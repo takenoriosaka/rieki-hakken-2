@@ -1,0 +1,46 @@
+venv/
+*.db
+# APIキー等（set_api_key.command が作る .env）。.env.local 等の派生も含め公開しない
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+logs/
+.DS_Store
+
+# ローカルのリサーチ画面(app.py)の前回結果
+local_results/
+
+# DB バックアップ・スキャンの一時ログ
+arbitrage.db.bak-*
+scan_output_*.log
+*.log
+
+# 知り合いモードのマーカー（setup_for_friend.command が作成）
+.rieki_friend_mode
+# SQLite の一時ファイル（price_cache などは arbitrage.db 内）
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 作業前のバックアップ（.backup-20261107-kind/ 等）
+.backup-*/
+
+# 仕入れリスト（自分のブランド・ジャンルのリスト。my_list.py。共有しない）
+my_list.json
+my_list.json.tmp
+my_list.json.bak-*
+# 学校（物販ONE）のブランド一覧を書き写したもの。import_brands.py で取り込む。教材の内容なので共有しない
+course_brands.json
+# 学校（物販ONE）のジャンル解説・年間スケジュールの要約メモ。教材の内容なので共有しない
+course_genre_notes.json
+course_genre_notes.md
+
+# 作業前のバックアップファイル（app.py.bak-20261114b など。公開しない）
+*.bak-2026*
+*.bak-20*
+
+# ブランド一覧（brands.enc）のパスワードと、前回取り込んだ brands.enc の印（brands_sync.py / export_brands.py。公開しない）
+.brands_password
+.brands_enc.sha256

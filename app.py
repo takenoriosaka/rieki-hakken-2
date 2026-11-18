@@ -1,0 +1,1014 @@
+"""
+ローカル リサーチ画面（Mac 上で起動してブラウザで操作する）
+
+起動:
+  ./venv/bin/python app.py        （または start.command をダブルクリック）
+  → ブラウザで http://127.0.0.1:8766 が開く
+
+・トップページでジャンル/ブランド/モデル名/型番/利益条件/オークション残り時間/
+  取得件数/仕入れ先をチェックして「リサーチ開始」。
+・スキャン本体は main.scan() をそのまま流用する（config.json は書き換えず、
+  画面で選んだ条件を実行時に渡すだけ）。
+・ローカル実行では DB の scan_deals 保存・docs/（GitHub Pages 用）生成・git push は
+  一切行わない（main.scan() はそれらを行わない関数。さらに環境変数でも二重に防止）。
+  メルカリ相場キャッシュ（price_cache）だけは従来どおり arbitrage.db に保存される。
+・待ち受けは 127.0.0.1 のみ（同じ Mac からしか開けない）。
+"""
+
+import copy
+import json
+import os
+import re
+import sys
+import threading
+import time
+import traceback
+import webbrowser
+from collections import deque
+from datetime import datetime
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+os.chdir(BASE_DIR)                      # config.json / arbitrage.db を相対パスで読むため
+sys.path.insert(0, BASE_DIR)
+os.environ["RIEKI_LOCAL_APP"] = "1"     # main.run() 側の push 防止ガード
+
+from flask import Flask, jsonify, request, send_from_directory  # noqa: E402
+
+import database          # noqa: E402
+import free_research     # noqa: E402
+import main as scan_main  # noqa: E402
+import model_extractor   # noqa: E402
+import my_list           # noqa: E402
+import analyzer          # noqa: E402
+import local_inspector   # noqa: E402
+import ocr_reader        # noqa: E402
+import photo_reader      # noqa: E402
+
+HOST = "127.0.0.1"
+PORT = int(os.environ.get("RIEKI2_PORT", "8766"))  # 利益発見ツール2（元の利益発見ツールは 8765）
+UI_DIR = os.path.join(BASE_DIR, "local_ui")
+ASSETS_DIR = os.path.join(BASE_DIR, "dashboard_assets")
+RESULT_DIR = os.path.join(BASE_DIR, "local_results")
+LAST_RESULT_PATH = os.path.join(RESULT_DIR, "last_result.json")
+
+# 「オメガ シーマスター」の2語目がモデル名かどうか判定するときに除外する一般名詞
+_GENERIC_WORDS = {"時計", "腕時計", "ダウン", "ダウンコート", "サングラス", "ジュエリー", "アクセサリー", "スカーフ", "バッグ", "財布"}
+
+# 旧ジャンル名 → 現在のジャンル名（保存済みの選択・過去の結果に旧名が残っていても動くように）
+_CATEGORY_RENAMES = {"ジュエリー": "アクセサリー"}
+
+
+def _cat(name: str) -> str:
+    return _CATEGORY_RENAMES.get(name, name)
+
+app = Flask(__name__, static_folder=None)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 設定・選択肢
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _load_config() -> dict:
+    with open(scan_main.CONFIG_PATH, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _brand_of(kw: dict) -> str:
+    return kw.get("brand_name") or kw["name"].split()[0]
+
+
+def _has_digit(s: str) -> bool:
+    return bool(re.search(r"\d", s))
+
+
+def _is_number(m: str, brand: str) -> bool:
+    """型番として扱うか。数字を含んでもモデル名として登録済みのもの（ルイヴィトンの
+    スピーディ30・キーポル55 等）はモデル名として扱う"""
+    return _has_digit(m) and model_extractor.extract_name(m, brand) != m
+
+
+def _norm(s: str) -> str:
+    """型番・モデル名の比較用（空白・ハイフン・ドット・中黒を除去して大文字化）"""
+    return re.sub(r"[\s\-_.・]", "", s or "").upper()
+
+
+def _model_aliases() -> dict[str, list[str]]:
+    """モデル名 → 照合用の全表記（model_extractor.model_aliases）の表。
+    キーはカタカナ名・英字名・表記ゆれのどれでも引けるよう大文字で登録する。
+    例: トリニティ / TRINITY → [トリニティ, TRINITY]
+    """
+    aliases: dict[str, list[str]] = {}
+    for brand, names in model_extractor._MODEL_NAMES.items():
+        for name in names:
+            forms = model_extractor.model_aliases(name, brand)
+            for f in [name] + forms:
+                aliases.setdefault(f.upper(), forms)
+    return aliases
+
+
+def _number_categories(numbers: dict[str, list[str]]) -> dict[str, dict[str, str]]:
+    """ジャンルで型番の照合が変わるブランド（グッチ: 時計/サングラス）について、
+    型番の候補ごとにどのジャンルの型番かを返す（ブランド → {型番: ジャンル}）"""
+    known = getattr(model_extractor, "MODEL_NUMBER_CATEGORIES", {})
+    cfg_cats: dict[str, list[str]] = {}
+    for kw in _load_config()["keywords"]:
+        cfg_cats.setdefault(_brand_of(kw), [])
+        c = _cat(kw.get("category", "") or "その他")
+        if c not in cfg_cats[_brand_of(kw)]:
+            cfg_cats[_brand_of(kw)].append(c)
+    out: dict[str, dict[str, str]] = {}
+    for b, nums in numbers.items():
+        if not model_extractor.has_category_extractor(b):
+            continue
+        m: dict[str, str] = {}
+        for n in nums:
+            c = known.get(b, {}).get(n)
+            if c is None:
+                c = next((c for c in cfg_cats.get(b, []) if model_extractor.extract(n, b, c)), None)
+            if c:
+                m[n] = c
+        out[b] = m
+    return out
+
+
+def _number_fits(num: str, brand: str, cat: str) -> bool:
+    """型番がそのジャンルのキーワードで使えるか。ジャンル別の照合があるブランド（グッチ）だけ判定し、
+    それ以外のブランドは従来どおり常に True"""
+    if not model_extractor.has_category_extractor(brand):
+        return True
+    if model_extractor.extract(num, brand, cat) is not None:
+        return True
+    # どのジャンルの形式にも当てはまらない型番（自由入力の未登録型番など）は従来どおり全ジャンルで使う
+    others = {_cat(kw.get("category", "") or "その他") for kw in _load_config()["keywords"]
+              if _brand_of(kw) == brand} - {cat}
+    return not any(model_extractor.extract(num, brand, c) for c in others)
+
+
+def build_options() -> dict:
+    cfg = _load_config()
+    settings = cfg["settings"]
+    keywords = cfg["keywords"]
+
+    categories: list[str] = []
+    brands: dict[str, dict] = {}
+    for kw in keywords:
+        cat = _cat(kw.get("category", "") or "その他")
+        if cat not in categories:
+            categories.append(cat)
+        b = _brand_of(kw)
+        entry = brands.setdefault(b, {"name": b, "categories": [], "keywords": []})
+        if cat not in entry["categories"]:
+            entry["categories"].append(cat)
+        entry["keywords"].append(kw["name"])
+
+    # モデル名（ブランドごと）: キーワードの2語目 + model_extractor の名称リスト + 過去の検出実績
+    models: dict[str, list[str]] = {b: [] for b in brands}
+    numbers: dict[str, list[str]] = {b: [] for b in brands}
+
+    def add(target: dict, brand: str, name: str):
+        if brand in target and name and name not in target[brand]:
+            target[brand].append(name)
+
+    for kw in keywords:
+        toks = kw["name"].split()
+        for t in toks[1:]:
+            if t not in _GENERIC_WORDS and t != kw.get("category"):
+                add(models, _brand_of(kw), t)
+    for brand, names in model_extractor._MODEL_NAMES.items():
+        for n in names:
+            # 英字の別名は日本語名とまとめて扱う。英数字だけの正規名（ティファニーの 1837）は出す
+            if not n.isascii() or model_extractor.model_names(n, brand)[0] == n:
+                add(models, brand, n)
+    # 代表的な型番（ノースフェイスの ND91950 等）は過去の検出実績が無くても候補に出す
+    for brand, nums in getattr(model_extractor, "KNOWN_MODEL_NUMBERS", {}).items():
+        for n in nums:
+            add(numbers, brand, n)
+    try:
+        database.init_db()
+        with database._conn() as conn:
+            rows = conn.execute(
+                "SELECT brand, model, COUNT(*) AS c FROM scan_deals "
+                "WHERE model != '' GROUP BY brand, model ORDER BY brand, c DESC"
+            ).fetchall()
+        aliases = _model_aliases()
+        known_upper = {b: {m.upper() for g in (aliases.get(m.upper(), [m]) for m in ms) for m in g}
+                       for b, ms in models.items()}
+        for r in rows:
+            b, m = r["brand"], r["model"]
+            if _is_number(m, b):
+                add(numbers, b, m)
+            elif m.upper() not in known_upper.get(b, set()):
+                add(models, b, m)
+    except Exception as e:  # DB が無くても画面は出す
+        print(f"[app] 過去の型番読み込みエラー: {e}")
+    # 主力モデルだけをリサーチするブランド（ルイヴィトン）: 候補を主力のモデル名・型番だけにする
+    # （過去の検出実績から入った主力以外のモデルも出さない。並びは主力リストの順）
+    for b, focus in model_extractor.FOCUS_MODELS.items():
+        if b in models:
+            models[b] = [m for m in focus["names"] if m in models[b]]
+            numbers[b] = [n for n in focus["numbers"] if n in numbers[b]]
+
+    sources = [
+        {"key": k, "label": v, "auction": k == "yahoo_auctions"}
+        for k, v in scan_main.SOURCE_LABELS.items()
+    ]
+    try:
+        free = free_research.suggestions(list(brands))
+    except Exception as e:   # 候補が作れなくても画面は出す
+        print(f"[app] フリーリサーチの候補の読み込みエラー: {e}")
+        free = {"brands": [{"name": b, "count": 0, "avg_profit": 0, "genres": {}, "registered": True} for b in brands],
+                "genres": [{"key": g["key"], "label": g["label"], "icon": g["icon"], "count": 0}
+                           for g in free_research.GENRES], "features": [], "seed_count": 0}
+    return {
+        # フリーリサーチモードの入力候補（ブランド・ジャンル・注目ポイント。利益商品共有のデータの件数つき）
+        "free": free,
+        "categories": categories,
+        "brands": list(brands.values()),
+        "models": models,
+        "model_numbers": numbers,
+        # 型番の候補に添える愛称（ブランド → {型番: 愛称}）。例: RB2140 → ウェイファーラー
+        "model_number_labels": getattr(model_extractor, "MODEL_NUMBER_LABELS", {}),
+        # ジャンル専用の型番（ブランド → {型番: ジャンル}）。例: グッチ YA126402 → 時計。
+        # 画面では選択中のジャンルの型番だけを出す（グッチのサングラスだけ選んだときに時計の型番を出さない）
+        "model_number_categories": _number_categories(numbers),
+        # ジャンル専用のモデル名（ブランド → {モデル名: ジャンル}）。例: ルイヴィトン スピーディ30 → バッグ
+        "model_categories": {
+            b: {m: c for m in ms for c in [model_extractor.model_category(m, b)] if c}
+            for b, ms in models.items()
+        },
+        # 英字名でも検索するモデル（ブランド → {カタカナ名: 英字名}）。画面の所要時間の目安に使う
+        "model_en": {
+            b: {m: n[1] for m in ms if not _is_number(m, b)
+                for n in [model_extractor.search_names(m, b)] if len(n) > 1}
+            for b, ms in models.items()
+        },
+        "sources": sources,
+        # 英字ブランド名の検索語（CANADA GOOSE JASPER 等）を使う仕入れ先（画面の所要時間の目安に使う）
+        "en_brand_sources": list(settings.get("en_brand_sources", scan_main.EN_BRAND_SOURCES)),
+        "keywords": [
+            {"name": kw["name"], "brand": _brand_of(kw), "category": _cat(kw.get("category", "") or "その他"),
+             # モデル未選択のときに足す検索語の本数（search_all_models。画面の所要時間の目安に使う）
+             "model_queries": _extra_query_count(kw, cfg),
+             # 英字ブランド名の検索語の本数（en_brand_sources の仕入れ先でだけ数える）と、モデルを選んだときに足すか
+             "en_queries": len(all_model_en_queries(kw, cfg)),
+             "en_brand": bool(kw.get("en_brand_name"))}
+            for kw in keywords
+        ],
+        "defaults": {
+            "min_profit": settings.get("min_profit_yen", 3000),
+            "min_roi": 0,
+            "per_source": 20,
+            "config_per_source": settings.get("search_items_per_source", 80),
+            # 写真AI確認（有料・Claude API。型番タグ・傷汚れ）のチェックの既定は常にオフ（料金がかかるため）
+            "photo_check": False,
+            # 写真のタグ読み取り（無料・Mac内OCR）のチェックの既定（この Mac で使えるときはオン）
+            "photo_ocr": ocr_reader.available(),
+            # 写真で傷・汚れ確認（無料・Mac内AI = Ollama）のチェックの既定はオン（普段使い。Ollama が使える Mac だけ有効。
+            # 気になる商品だけ「URLをコピー」して Claude Code で個別に確認する運用）
+            "photo_local": True,
+        },
+        "photo_check_available": photo_reader.status()[0],
+        "photo_ocr_available": ocr_reader.available(),
+        # Mac内AI: Ollama が入っていなければ項目ごと出さない（installed）。入っていてサーバーが止まっていれば起動を試みる
+        **_local_options(),
+    }
+
+
+def _local_options() -> dict:
+    """Mac内AI（Ollama）の項目を画面に出すか・使えるか（使えないときの理由は日本語で）"""
+    if not local_inspector.installed():
+        return {"photo_local_installed": False, "photo_local_available": False, "photo_local_reason": ""}
+    ok, reason = local_inspector.check_server(start=True)
+    return {"photo_local_installed": True, "photo_local_available": ok, "photo_local_reason": reason,
+            "photo_local_model": local_inspector.DEFAULTS["photo_local_model"]}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 条件 → スキャン計画
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _to_int(v, default=None):
+    try:
+        if v is None or v == "":
+            return default
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def _brand_models(brand: str) -> list[str]:
+    """ブランドの登録済みモデル名（カタカナの正規名。英字だけの正規名はそのまま）の一覧"""
+    out: list[str] = []
+    for n in model_extractor._MODEL_NAMES.get(brand, []):
+        canon = model_extractor.model_names(n, brand)[0]
+        if canon not in out:
+            out.append(canon)
+    focus = model_extractor.FOCUS_MODELS.get(brand)
+    if focus:   # 主力モデルだけをリサーチするブランド（ルイヴィトン）
+        out = [m for m in out if m in focus["names"]]
+    return out
+
+
+def _extra_query_count(kw: dict, cfg: dict) -> int:
+    """モデル未選択のときにキーワード名の1本に足される検索語の本数（build_plan と同じ数え方。
+    search_queries を持つキーワード＝ヘルノは、その本数も含める）。画面の所要時間の目安用"""
+    extra = all_model_queries(kw, cfg)
+    if not extra:
+        return 0
+    base = [q for q in (kw.get("search_queries") or [kw["name"]]) if q]
+    en = set(all_model_en_queries(kw, cfg))
+    return len(base) - 1 + len([q for q in extra if q not in base and q not in en])
+
+
+def all_model_en_queries(kw: dict, cfg: dict) -> list[str]:
+    """all_model_queries のうち、ブランド名も英字にした検索語（en_brand_name。main.EN_BRAND_SOURCES の仕入れ先でだけ使う）"""
+    if not kw.get("en_brand_name"):
+        return []
+    brand = _brand_of(kw)
+    cat = _cat(kw.get("category", "") or "その他")
+    out: list[str] = []
+    for m in _brand_models(brand):
+        if model_extractor.name_fits(m, brand, cat):
+            for q in _en_brand_queries(kw, model_extractor.search_names(m, brand)):
+                if q not in out:
+                    out.append(q)
+    return out
+
+
+def all_model_queries(kw: dict, cfg: dict) -> list[str]:
+    """search_all_models が有効なキーワードで、モデル未選択のときに足す検索語の一覧。
+    全モデルについて「ブランド名 + カタカナ名」「ブランド名 + 英字名」（model_extractor.search_names の
+    ルール。英字名が無い・同じ表記のモデルは1本）。モデルを選んだときと同じ検索語にする（build_plan 参照）。
+    フラグが無いキーワードは []（他ブランドの挙動は変えない）"""
+    if not kw.get("search_all_models"):
+        return []
+    brand = _brand_of(kw)
+    cat = _cat(kw.get("category", "") or "その他")
+    queries: list[str] = []
+    for m in _brand_models(brand):
+        if not model_extractor.name_fits(m, brand, cat):
+            continue
+        names = model_extractor.search_names(m, brand)
+        fits = [k for k in cfg["keywords"] if _brand_of(k) == brand
+                and model_extractor.name_fits(m, brand, _cat(k.get("category", "") or "その他"))]
+        head = brand if len(fits) <= 1 else kw["name"]
+        for q in [f"{head} {names[0]}"] + [f"{brand} {n}" for n in names[1:]] + _en_brand_queries(kw, names):
+            if q not in queries:
+                queries.append(q)
+    return queries
+
+
+def _en_brand_queries(kw: dict, names: list[str]) -> list[str]:
+    """ブランド名も英字にした検索語（config.json の en_brand_name。例: カナダグース → 「CANADA GOOSE JASPER」）。
+    英字だけのタイトルの出品（CANADA GOOSE JASPER PARKA 等）を、カタカナのブランド名の検索で取りこぼさないため。
+    英字名（search_names の2件目以降）があるモデルだけ。en_brand_name が無いキーワードは []"""
+    en_brand = kw.get("en_brand_name")
+    if not en_brand:
+        return []
+    return [f"{en_brand} {n}" for n in names[1:]]
+
+
+def build_plan(req: dict, cfg: dict) -> list[tuple[dict, str | None]]:
+    """画面の条件から (キーワード設定, 絞り込みモデル or None) のリストを作る。
+    モデル名・型番が選ばれたブランドは「ブランド名 + 型番」等で個別に検索し、
+    結果もそのモデルを含むものに絞る。キーワード自体にモデル名が入っている場合
+    （例: オメガ シーマスター）はそのまま検索する。
+    """
+    cats = {_cat(c) for c in (req.get("categories") or [])}
+    brands = set(req.get("brands") or [])
+    # "ブランド|モデル" 形式（チェックボックス）
+    picked: dict[str, list[str]] = {}
+    for v in (req.get("models") or []) + (req.get("model_numbers") or []):
+        if "|" in v:
+            b, m = v.split("|", 1)
+            picked.setdefault(b, []).append(m.strip())
+    free_numbers = [t.strip() for t in re.split(r"[,、，\s]+", req.get("free_numbers") or "") if t.strip()]
+    # 自由入力の型番は、型番の形式から判別できるブランド（例: 2531.80→オメガ）にだけ使う。
+    # どのブランドの形式にも当てはまらなければ、選択中の全ブランドで検索する。
+    # ジャンルで型番の形式が変わるブランド（グッチ: 時計 YA126402 / サングラス GG0061S）は、
+    # 選択中のジャンルで判別する。
+    sel_pairs = {(_brand_of(kw), _cat(kw.get("category", "") or "その他")) for kw in cfg["keywords"]}
+    sel_pairs = {(b, c) for b, c in sel_pairs if b in brands and c in cats}
+    free_for: dict[str, list[str]] = {}
+    for num in free_numbers:
+        owners = {b for b, c in sel_pairs if model_extractor.extract(num, b, c)}
+        for b in owners or brands:
+            free_for.setdefault(b, []).append(num)
+
+    plan: list[tuple[dict, str | None]] = []
+    seen: set[str] = set()
+    for kw in cfg["keywords"]:
+        cat = _cat(kw.get("category", "") or "その他")
+        brand = _brand_of(kw)
+        if cat not in cats or brand not in brands:
+            continue
+        targets = picked.get(brand, []) + free_for.get(brand, [])
+        # グッチ等: 時計の型番はサングラスのキーワードでは使わない（逆も同じ）
+        targets = [m for m in targets if not _is_number(m, brand) or _number_fits(m, brand, cat)]
+        # ルイヴィトン: バッグのモデル名（スピーディ30 等）はサングラスのキーワードでは使わない
+        targets = [m for m in targets if _is_number(m, brand) or model_extractor.name_fits(m, brand, cat)]
+        if not targets:
+            if kw["name"] not in seen:
+                seen.add(kw["name"])
+                # モデル名展開の検索（config.json の search_all_models。ダウンの各ブランド）: モデルを選ばなかったときは
+                # 「タトラス ダウン」に加えて登録済みの全モデルの「タトラス <カタカナ名>」「タトラス <英字名>」でも
+                # 仕入れ先を検索する（取りこぼしを無くすため。結果の照合は従来どおり型番優先・無ければモデル名）
+                extra = all_model_queries(kw, cfg)
+                if extra:
+                    kw = copy.deepcopy(kw)
+                    # キーワードに search_queries があればそれを残す（ヘルノ: 「ヘルノ LAMINAR ダウンコート」）
+                    base = [q for q in (kw.get("search_queries") or [kw["name"]]) if q]
+                    kw["search_queries"] = base + [q for q in extra if q not in base]
+                    # 英字ブランド名の検索語（main.EN_BRAND_SOURCES の仕入れ先でだけ使う）
+                    kw["en_brand_queries"] = [q for q in all_model_en_queries(kw, cfg) if q not in base]
+                plan.append((kw, None))
+            continue
+        for m in targets:
+            if _norm(m) in _norm(kw["name"]):
+                if kw["name"] not in seen:
+                    seen.add(kw["name"])
+                    plan.append((kw, None))
+                continue
+            c = copy.deepcopy(kw)
+            # 型番はブランド名と組み合わせて1本で検索。モデル名は
+            #   カタカナ名: ブランド名 + カタカナ名（例: ティファニー ハードウェア）
+            #   英字名:     ブランド名 + 英字名      （例: ティファニー HARDWEAR）
+            # の2本で検索する（英字だけのタイトルの出品も拾うため）。ラクマ・ヤフオクは
+            # デュベティカ/DUVETICA 等のブランド名を同一視して検索するので、英字側の
+            # ブランド名はカタカナのままでよい。ジャンル語（ジュエリー・バッグ等）は出品タイトルに
+            # 入らないことが多く、付けると0件になりやすいので付けない（ジャンルの絞り込みは
+            # required_words / exclude_words の照合で行う）。
+            # ただし同じブランドの複数ジャンルで使えるモデル名（例: 時計とジュエリー両方に
+            # キーワードがあるブランドのモデル名）は、ジャンルごとの検索を区別するため
+            # 元のキーワード + カタカナ名（例: カルティエ 時計 サントス）のままにする。
+            if _is_number(m, brand):
+                c["name"] = f"{brand} {m}"
+            else:
+                names = model_extractor.search_names(m, brand)
+                fits = [k for k in cfg["keywords"] if _brand_of(k) == brand
+                        and model_extractor.name_fits(m, brand, _cat(k.get("category", "") or "その他"))]
+                head = brand if len(fits) <= 1 else kw["name"]
+                c["name"] = f"{head} {names[0]}"
+                if len(names) > 1:
+                    en_qs = _en_brand_queries(kw, names)
+                    c["search_queries"] = [c["name"]] + [f"{brand} {n}" for n in names[1:]] + en_qs
+                    if en_qs:
+                        c["en_brand_queries"] = en_qs
+            c["brand_name"] = brand
+            if c["name"] not in seen:
+                seen.add(c["name"])
+                plan.append((c, m))
+    return plan
+
+
+def _deal_matches_model(deal, model: str, aliases: dict[str, list[str]]) -> bool:
+    # 厳密照合ブランド（デュベティカ・ノースフェイス）は抽出済みのモデル名/型番で判定する
+    # （「ヌプシジャケット」を選んだときに「ショートヌプシ」を含めない）
+    if deal.model and model_extractor.is_strict_brand(deal.brand):
+        want = model_extractor.extract(model, deal.brand) or model
+        if _norm(deal.model) == _norm(want):
+            return True
+        # タトラス・カナダグース・モンクレール: 品番で照合した出品も、タイトルのモデル名が選んだモデルなら含める
+        if model_extractor.name_fallback(deal.brand):
+            return model_extractor.extract_name(deal.item.title, deal.brand) == want
+        return False
+    if deal.model and (model_extractor.model_names(deal.model, deal.brand)[0]
+                       == model_extractor.model_names(model, deal.brand)[0]):
+        return True
+    names = aliases.get(model.upper(), [model])
+    hay_title = _norm(deal.item.title)
+    hay_model = _norm(deal.model)
+    for n in names:
+        nn = _norm(n)
+        if nn and (nn in hay_title or (hay_model and nn in hay_model)):
+            return True
+    return False
+
+
+def _deal_to_dict(d) -> dict:
+    return {
+        "keyword": d.keyword,
+        "brand": d.brand,
+        "model": d.model,
+        "category": _cat(d.category),
+        "title": d.item.title,
+        "url": d.item.url,
+        "source": d.item.source,
+        "image_url": d.item.image_url or "",
+        "purchase_price": d.item.price,
+        "reference_price": d.mercari_avg_price,
+        "estimated_profit": d.estimated_profit,
+        "roi_percent": d.roi_percent,
+        "condition_label": d.condition_label,
+        "text_condition_label": d.text_condition_label,
+        # 写真から AI が判定した状態（rank / issues / confidence / unchecked）。未確認なら None
+        "photo_condition": d.photo_condition,
+        "end_time": d.item.end_time,
+        "is_auction": d.item.is_auction,
+        # 仕入れ値に含めた送料（Yahoo!ショッピング）。None = 送料は別（従来どおり）
+        "shipping": d.item.shipping,
+        "base_price": d.item.base_price,
+        "postage_estimated": d.item.postage_estimated,
+        # フリーリサーチモードの相場の根拠・信頼度・性別・注目ポイント（通常のモードでは None）
+        "free_info": d.free_info,
+        "photo_model": getattr(d, "photo_model", None),
+    }
+
+
+def _best_rows(deals, keep=None) -> list[dict]:
+    """案件の一覧 → 画面の結果（keep で絞り込み、同じ出品URLは見込み利益の大きい1件、利益の大きい順）"""
+    best: dict[str, object] = {}
+    for d in deals:
+        if keep is not None and not keep(d):
+            continue
+        prev = best.get(d.item.url)
+        if prev is None or d.estimated_profit > prev.estimated_profit:
+            best[d.item.url] = d
+    return sorted((_deal_to_dict(d) for d in best.values()),
+                  key=lambda r: r["estimated_profit"], reverse=True)
+
+
+class _LiveResults:
+    """リサーチ実行中の途中経過（main.scan / free_research.scan の live）。スキャンのスレッドから呼ばれる。
+    見つかった案件を写真確認の前でもすぐ画面に出す。画面に出す一覧は、最後の結果と同じ絞り込み・重複のまとめ
+    （finalize）を、その時点までに見つかった案件にかけたもの。最後の結果（JOB.results・last_result.json）は
+    従来どおりスキャンの戻り値から作り、この途中経過は使わない"""
+
+    def __init__(self, finalize):
+        self.lock = threading.Lock()
+        self.finalize = finalize   # list[Deal] → list[dict]
+        self.raw: list = []        # 見つかった順の案件（写真確認の前）
+        self.updated: dict[int, object] = {}   # raw の位置 → 写真確認で計算し直した案件（None = 利益不足で除外）
+        self.photo_phase = False   # 写真で傷・汚れの確認を始めたか
+        self.photo_total = 0       # 写真を確認する出品の数
+        self.version = 0
+        self._built = (-1, [], {})
+
+    def deal(self, d):
+        with self.lock:
+            self.raw.append(d)
+            self.version += 1
+
+    def photo_start(self, n: int):
+        with self.lock:
+            self.photo_phase = True
+            self.photo_total = n
+            self.version += 1
+
+    def photo(self, url: str, recalc):
+        with self.lock:
+            for i, d in enumerate(self.raw):
+                if d.item.url == url:
+                    self.updated[i] = recalc(d)
+            self.version += 1
+
+    def build(self) -> tuple[list[dict], dict]:
+        """(画面に出す一覧, 途中経過の情報)。版が変わったときだけ作り直す"""
+        with self.lock:
+            if self._built[0] == self.version:
+                return self._built[1], self._built[2]
+            version = self.version
+            current, checked, dropped = [], set(), set()
+            for i, d in enumerate(self.raw):
+                if i in self.updated:
+                    nd = self.updated[i]
+                    checked.add(d.item.url)
+                    if nd is None:
+                        dropped.add(d.item.url)
+                        continue
+                    current.append(nd)
+                else:
+                    current.append(d)
+            photo_phase, photo_total = self.photo_phase, self.photo_total
+        try:
+            rows = self.finalize(current)
+        except Exception as e:   # 途中経過の表示の失敗でリサーチを止めない
+            print(f"[app] 途中経過の作成エラー: {e}")
+            with self.lock:
+                return self._built[1], self._built[2]
+        photo_check = bool(analyzer._flags.get("photo_check"))
+        for r in rows:
+            if photo_check and r["url"] not in checked:
+                r["photo_pending"] = True
+        info = {
+            "version": version,
+            "photo_check": photo_check,
+            "photo_phase": photo_phase,
+            "photo_total": photo_total,
+            "photo_done": len(checked),
+            "photo_dropped": len(dropped - {r["url"] for r in rows}),
+            "pending": sum(1 for r in rows if r.get("photo_pending")),
+        }
+        with self.lock:
+            if self.version == version:
+                self._built = (version, rows, info)
+        return rows, info
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ジョブ（同時に1件だけ）
+# ──────────────────────────────────────────────────────────────────────────────
+
+class _Job:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.thread: threading.Thread | None = None
+        self.state = "idle"        # idle / running / done / stopped / error
+        self.index = 0
+        self.total = 0
+        self.keyword = ""
+        self.q_index = 0           # キーワード内の何本目の検索か（仕入れ先 × 検索語。0 始まり）
+        self.q_total = 0           # キーワード内の検索の本数（0 = 不明）
+        self.started_at = None
+        self.finished_at = None
+        self.logs: deque[str] = deque(maxlen=400)
+        self.results: list[dict] = []
+        self.conditions: dict = {}
+        self.error = ""
+        self.stop_requested = False
+        self.found_count = 0       # 実行中に見つかった案件候補の数（ログの「--> N 件の案件」を合算）
+        self.live: _LiveResults | None = None   # 実行中の途中経過（見つかった案件をすぐ画面に出す）
+
+    def snapshot(self, with_results: bool) -> dict:
+        # 実行中は、ここまでに見つかった案件（途中経過）を結果として返す（ページを開き直しても続きが見える）
+        live = self.live if self.state == "running" else None
+        live_rows, live_info = live.build() if live is not None else (None, None)
+        with self.lock:
+            out = {
+                "state": self.state,
+                "index": self.index,
+                "total": self.total,
+                "keyword": self.keyword,
+                "q_index": self.q_index,
+                "q_total": self.q_total,
+                "started_at": self.started_at,
+                "finished_at": self.finished_at,
+                "logs": list(self.logs)[-60:],
+                "result_count": len(self.results),
+                "found_count": self.found_count,
+                "conditions": self.conditions,
+                "error": self.error,
+                # 写真から型番を読む機能の有効/無効とスキャン統計（.env の API キー等で判定。キーの中身は含まない）
+                "photo_read": photo_reader.status_info(),
+                # 写真のタグ読み取り（無料・Mac内OCR）の有効/無効とスキャン統計
+                "photo_ocr": ocr_reader.status_info(),
+                # 写真で傷・汚れ確認（無料・Mac内AI）の有効/無効とスキャン統計
+                "photo_local": local_inspector.status_info(),
+            }
+            if live_info is not None and self.state == "running":
+                out["result_count"] = len(live_rows)
+                out["live"] = live_info
+                if with_results:
+                    out["results"] = live_rows
+            elif with_results:
+                out["results"] = self.results
+            return out
+
+
+JOB = _Job()
+
+
+class _ThreadLogTee:
+    """sys.stdout の代わり。ジョブスレッドからの print をターミナルにも画面ログにも流す。"""
+
+    def __init__(self, original):
+        self.original = original
+        self._buf = ""
+
+    def write(self, s):
+        self.original.write(s)
+        if JOB.thread is not None and threading.current_thread() is JOB.thread:
+            self._buf += s
+            while "\n" in self._buf:
+                line, self._buf = self._buf.split("\n", 1)
+                if line.strip():
+                    m = _FOUND_RE.search(line)
+                    with JOB.lock:
+                        JOB.logs.append(line)
+                        if m:
+                            JOB.found_count += int(m.group(1))
+        return len(s)
+
+    def flush(self):
+        self.original.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.original, name)
+
+
+sys.stdout = _ThreadLogTee(sys.stdout)
+
+_FOUND_RE = re.compile(r"-->\s*(\d+)\s*件の案件")
+
+
+def _run_job(req: dict):
+    try:
+        cfg = _load_config()
+        settings = dict(cfg["settings"])
+        per_source = _to_int(req.get("per_source"), 20)
+        settings["search_items_per_source"] = max(1, min(per_source, 100))
+        min_profit = _to_int(req.get("min_profit"), settings.get("min_profit_yen", 3000))
+        settings["min_profit_yen"] = min_profit
+        min_roi = float(req.get("min_roi") or 0)
+        hours = req.get("auction_hours")
+        hours = float(hours) if hours not in (None, "", "0", 0) else None
+        auction_only = bool(req.get("auction_only"))
+        sources = set(req.get("sources") or [])
+        # 写真AI確認（有料・Claude API）: 画面でチェックを入れたときだけ（項目が無い・古い画面からはオフ）
+        settings["photo_check_enabled"] = req.get("photo_check") is True
+        # 写真のタグ読み取り（無料・Mac内OCR）: 画面のチェック。項目が無いときはオン
+        settings["photo_ocr_enabled"] = req.get("photo_ocr", True) is not False
+        # 写真で傷・汚れ確認（無料・Mac内AI）: 画面のチェック（画面の既定はオン。項目が無い古い画面からはオフ）
+        settings["photo_local_check_enabled"] = req.get("photo_local") is True
+        # Yahoo!ショッピング: 既定は中古のみ。画面で「新品も含める」にしたときだけ新品も検索する
+        settings["yahoo_shopping_condition"] = "all" if req.get("yahoo_shopping_new") is True else "used"
+
+        def progress(i, total, keyword, q_index=0, q_total=0):
+            # q_index / q_total: そのキーワードの中で何本目の検索か（仕入れ先 × 検索語。0 始まり）
+            with JOB.lock:
+                JOB.total = total
+                JOB.index = i
+                JOB.keyword = keyword
+                JOB.q_index = q_index
+                JOB.q_total = q_total
+
+        if req.get("mode") == "list":
+            # マイブランドでリサーチ（旧: 仕入れリスト）: オンのブランド（または1グループ・1ブランド）× そのブランドのジャンルを、
+            # フリーリサーチの仕組みで順番に調べる（my_list.to_free_request が list_pairs を作り、英字表記も登録する）
+            req = my_list.to_free_request(req)
+        if req.get("mode") == "free":
+            # フリーリサーチモード（登録済みのモデル・型番に縛られない。free_research 参照）
+            fp = free_research.parse_request(req)
+            with JOB.lock:
+                JOB.total = max(1, len(fp["pairs"]))
+            database.init_db()
+
+            def keep_free(d) -> bool:
+                return d.roi_percent >= min_roi
+
+            def live_free(current: list) -> list[dict]:
+                # 最後と同じ処理（下振れ時の利益 → 複数の仕入れ先の同じ商品をまとめる → 絞り込み）を
+                # 写しにかける（スキャン中の案件そのものは書き換えない）
+                cur = copy.deepcopy(current)
+                for d in cur:
+                    free_research._finish_info(d, settings)
+                return _best_rows(free_research._merge_cross_listed(cur, quiet=True), keep_free)
+
+            live = _LiveResults(live_free)
+            with JOB.lock:
+                JOB.live = live
+            deals = free_research.scan(req, settings, sources=sources, progress=progress,
+                                       should_stop=lambda: JOB.stop_requested, live=live)
+            _finish_job(_best_rows(deals, keep_free))
+            return
+
+        plan = build_plan(req, cfg)
+        with JOB.lock:
+            JOB.total = len(plan)
+        if not plan:
+            raise ValueError("条件に合うキーワードがありません（ジャンルとブランドを選んでください）")
+
+        n_queries = sum(len(kw.get("search_queries") or [kw["name"]]) for kw, _ in plan)
+        q_str = f"（検索語 {n_queries} 本）" if n_queries != len(plan) else ""
+        print("=" * 50)
+        print(f"ローカル リサーチ開始: {len(plan)} キーワード{q_str} / 仕入れ先 {','.join(sorted(sources))}")
+        print("=" * 50)
+
+        def item_filter(item) -> bool:
+            if auction_only and not item.is_auction:
+                return False
+            if hours is None:
+                return True
+            if not item.is_auction or not item.end_time:
+                return not auction_only   # 即決・フリマ形式は残り時間の対象外
+            remain = item.end_time - time.time()
+            return 0 < remain <= hours * 3600
+
+        aliases = _model_aliases()
+        model_of = {kw["name"]: m for kw, m in plan}
+
+        def keep(d) -> bool:
+            # search_keyword = その案件を見つけた検索キーワード（型番照合時も元のキーワード）
+            m = model_of.get(d.search_keyword or d.keyword)
+            if m and not _deal_matches_model(d, m, aliases):
+                return False
+            return d.roi_percent >= min_roi
+
+        live = _LiveResults(lambda current: _best_rows(current, keep))
+        with JOB.lock:
+            JOB.live = live
+        database.init_db()
+        deals = scan_main.scan(
+            [kw for kw, _ in plan], settings,
+            sources=sources, item_filter=item_filter,
+            progress=progress, should_stop=lambda: JOB.stop_requested,
+            live=live,
+        )
+        _finish_job(_best_rows(deals, keep))
+    except Exception as e:
+        traceback.print_exc()
+        with JOB.lock:
+            JOB.state = "error"
+            JOB.live = None
+            JOB.error = str(e)
+            JOB.finished_at = datetime.now().isoformat(timespec="seconds")
+
+
+def _finish_job(results: list[dict]) -> None:
+    with JOB.lock:
+        JOB.results = results
+        JOB.live = None
+        JOB.index = JOB.total if not JOB.stop_requested else JOB.index
+        JOB.state = "stopped" if JOB.stop_requested else "done"
+        JOB.finished_at = datetime.now().isoformat(timespec="seconds")
+    print(f"ローカル リサーチ完了: {len(results)} 件")
+    _save_last()
+
+
+def _save_last():
+    try:
+        os.makedirs(RESULT_DIR, exist_ok=True)
+        snap = JOB.snapshot(with_results=True)
+        with open(LAST_RESULT_PATH, "w", encoding="utf-8") as f:
+            json.dump(snap, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"[app] 結果保存エラー: {e}")
+
+
+def _load_last():
+    try:
+        with open(LAST_RESULT_PATH, encoding="utf-8") as f:
+            snap = json.load(f)
+        JOB.state = snap.get("state", "done")
+        JOB.index = snap.get("index", 0)
+        JOB.total = snap.get("total", 0)
+        JOB.started_at = snap.get("started_at")
+        JOB.finished_at = snap.get("finished_at")
+        JOB.results = snap.get("results", [])
+        for r in JOB.results:          # 旧ジャンル名（ジュエリー）で保存された結果
+            if isinstance(r, dict) and r.get("category"):
+                r["category"] = _cat(r["category"])
+        JOB.conditions = snap.get("conditions", {})
+        JOB.logs.extend(snap.get("logs", []))
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[app] 前回結果の読み込みエラー: {e}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ルーティング
+# ──────────────────────────────────────────────────────────────────────────────
+
+@app.get("/")
+def index():
+    return send_from_directory(UI_DIR, "index.html")
+
+
+@app.get("/ui/<path:name>")
+def ui_file(name):
+    return send_from_directory(UI_DIR, name)
+
+
+@app.get("/assets/<path:name>")
+def asset_file(name):
+    return send_from_directory(ASSETS_DIR, name)
+
+
+@app.get("/api/options")
+def api_options():
+    return jsonify(build_options())
+
+
+@app.post("/api/research")
+def api_research():
+    req = request.get_json(silent=True) or {}
+    with JOB.lock:
+        if JOB.state == "running":
+            return jsonify({"ok": False, "error": "リサーチ実行中です。終わるまでお待ちください"}), 409
+        if not req.get("sources"):
+            return jsonify({"ok": False, "error": "仕入れ先を1つ以上選んでください"}), 400
+        if req.get("mode") == "list" and not my_list.select_entries(
+                my_list.load(), str(req.get("list_group") or ""), req.get("list_ids") or None):
+            return jsonify({"ok": False, "error": "調べるブランドがありません（ブランドをオンにしてください）"}), 400
+        JOB.state = "running"
+        JOB.index = 0
+        JOB.total = 0
+        JOB.keyword = ""
+        JOB.q_index = 0
+        JOB.q_total = 0
+        JOB.logs.clear()
+        JOB.results = []
+        JOB.error = ""
+        JOB.stop_requested = False
+        JOB.found_count = 0
+        JOB.live = None
+        JOB.conditions = req
+        JOB.started_at = datetime.now().isoformat(timespec="seconds")
+        JOB.finished_at = None
+        JOB.thread = threading.Thread(target=_run_job, args=(req,), daemon=True)
+        JOB.thread.start()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/status")
+def api_status():
+    with_results = request.args.get("results") == "1"
+    return jsonify(JOB.snapshot(with_results))
+
+
+@app.post("/api/stop")
+def api_stop():
+    with JOB.lock:
+        if JOB.state == "running":
+            JOB.stop_requested = True
+    return jsonify({"ok": True})
+
+
+# ── マイブランド登録（my_list.json。画面のヘッダー「マイブランド登録」） ─────────────────────
+
+def _list_ok(extra: dict | None = None):
+    out = {"ok": True, "list": my_list.view()}
+    if extra:
+        out.update(extra)
+    return jsonify(out)
+
+
+def _list_err(e: Exception, code: int = 400):
+    msg = e.args[0] if isinstance(e, KeyError) and e.args else str(e)
+    return jsonify({"ok": False, "error": msg}), code
+
+
+@app.get("/api/mylist")
+def api_mylist():
+    return jsonify(my_list.view())
+
+
+@app.post("/api/mylist/entry")
+def api_mylist_add():
+    try:
+        e = my_list.add_entry(request.get_json(silent=True) or {})
+    except ValueError as ex:
+        return _list_err(ex)
+    return _list_ok({"entry": e})
+
+
+@app.put("/api/mylist/entry/<entry_id>")
+def api_mylist_update(entry_id):
+    try:
+        e = my_list.update_entry(entry_id, request.get_json(silent=True) or {})
+    except KeyError as ex:
+        return _list_err(ex, 404)
+    except ValueError as ex:
+        return _list_err(ex)
+    return _list_ok({"entry": e})
+
+
+@app.delete("/api/mylist/entry/<entry_id>")
+def api_mylist_delete(entry_id):
+    try:
+        my_list.delete_entry(entry_id)
+    except KeyError as ex:
+        return _list_err(ex, 404)
+    return _list_ok()
+
+
+@app.post("/api/mylist/toggle")
+def api_mylist_toggle():
+    b = request.get_json(silent=True) or {}
+    ids = b.get("ids")
+    n = my_list.set_enabled(bool(b.get("enabled")), ids=ids if isinstance(ids, list) else None,
+                            group=b.get("group") or "")
+    return _list_ok({"changed": n})
+
+
+@app.post("/api/mylist/genre")
+def api_mylist_genre():
+    b = request.get_json(silent=True) or {}
+    try:
+        if b.get("remove"):
+            my_list.remove_custom_genre(str(b.get("label") or ""))
+            return _list_ok()
+        t = my_list.add_custom_genre(str(b.get("label") or ""))
+    except ValueError as ex:
+        return _list_err(ex)
+    return _list_ok({"genre": t})
+
+
+@app.post("/api/mylist/defaults")
+def api_mylist_defaults():
+    b = request.get_json(silent=True) or {}
+    try:
+        my_list.set_group_defaults(str(b.get("group") or ""), b.get("genres") or [])
+    except ValueError as ex:
+        return _list_err(ex)
+    return _list_ok()
+
+
+if __name__ == "__main__":
+    _load_last()
+    url = f"http://{HOST}:{PORT}"
+    print(f"利益発見ツール2 のリサーチ画面: {url}  （終了するにはこのウィンドウで Ctrl+C）")
+    if os.environ.get("RIEKI_NO_BROWSER") != "1":
+        threading.Timer(1.2, lambda: webbrowser.open(url)).start()
+    app.run(host=HOST, port=PORT, debug=False, threaded=True, use_reloader=False)

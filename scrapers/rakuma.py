@@ -1,0 +1,226 @@
+"""
+ラクマ (fril.jp) スクレイパー
+
+- 相場算出には使えない（売却済みデータの取得手段がないため、仕入れ候補ソースとしてのみ機能）
+- ページネーションパラメータは未確認のため &page=2 を試行し、
+  前ページと重複（新規URLが0件）なら打ち切る設計にしている
+- 売り切れ（SOLD OUT）の出品は仕入れられないので除く。検索URLに transaction=selling
+  （画面の「販売中のみ」チェックと同じ条件）を付け、カード側でも SOLD OUT のリボンを見て二重に除外する
+"""
+
+import time
+
+import requests
+from bs4 import BeautifulSoup
+
+from models import Item
+
+_SEARCH_URL = "https://fril.jp/s"
+# 検索画面の「販売中のみ」チェック（サイトのJSが URL に transaction=selling を付ける）。
+# 2026-10 にログインなしで確認: 「タトラス ポリテアマ」で指定なし 599件 → 販売中のみ 89件、
+# 販売中のみの 1〜2ページ目（各40件）に SOLD OUT のリボンは 0件
+_SELLING_ONLY = {"transaction": "selling"}
+_MAX_PAGES = 3
+
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+}
+
+
+def get_cheap_listings(
+    keyword: str,
+    max_price: int,
+    min_price: int = 0,
+    count: int = 40,
+    exclude_words: list[str] | None = None,
+    immediate_only: bool = False,
+) -> list[Item]:
+    """
+    ラクマで keyword を検索し、仕入れ候補を返す。
+
+    Args:
+        min_price: 最低価格（0 の場合は下限なし）
+        exclude_words: 除外キーワードリスト（タイトル部分一致でクライアント側フィルタ）
+        immediate_only: ラクマは全品固定価格のため未使用（受け取るだけで無視する）
+    """
+    ex_lower = [w.lower() for w in exclude_words] if exclude_words else []
+
+    try:
+        items: list[Item] = []
+        seen_urls: set[str] = set()
+
+        for page in range(1, _MAX_PAGES + 1):
+            params = {"query": keyword, **_SELLING_ONLY}
+            if page > 1:
+                params["page"] = page
+            resp = requests.get(_SEARCH_URL, params=params, headers=_HEADERS, timeout=15)
+            if resp.status_code == 404 and page > 1:
+                # 最後のページの次は 404 になる（2026-11 確認）。取得済みのページの出品は捨てずに返す
+                break
+            resp.raise_for_status()
+
+            page_items = _parse_page(resp.text, min_price, max_price, ex_lower)
+
+            new_items = [it for it in page_items if it.url not in seen_urls]
+            if not new_items:
+                # ページネーション未対応（前ページと同一内容）または該当なし → 打ち切り
+                break
+
+            for it in new_items:
+                seen_urls.add(it.url)
+            items.extend(new_items)
+
+            if len(items) >= count:
+                break
+            if page < _MAX_PAGES:
+                time.sleep(1)
+
+        return items[:count]
+    except Exception as e:
+        print(f"[ラクマ] 取得エラー ({keyword}): {e}")
+        return []
+
+
+def get_description(url: str) -> str | None:
+    """商品詳細ページから説明文を取得する（タイトルに型番がない場合のフォールバック用）。
+    説明文が空なら ''、取得エラー・ページ構造が想定外なら None（次回再取得）を返す。
+
+    説明文は div.item__description__line-limited（PC用・スマホ用の2箇所に同じ内容）にある。
+    ログインなしの requests で取得できることを確認済み（2026-10時点）。
+    """
+    try:
+        resp = requests.get(url, headers=_HEADERS, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+        # 同じページの商品写真のURLも控えておく（get_image_urls で再取得せずに使う）
+        imgs = _parse_images(soup)
+        if imgs:
+            _image_urls[url] = imgs
+        el = soup.select_one("div.item__description__line-limited")
+        return el.get_text("\n", strip=True) if el else None
+    except Exception as e:
+        print(f"[ラクマ] 説明文取得エラー ({url}): {e}")
+        return None
+
+
+# 商品ページの在庫状態。2026-10 にログインなしで売り切れ・販売中のページを取得して確認済み:
+#   - 売り切れ: <meta property="product:availability" content="out of stock">
+#               （写真に div.photo-box__soldout_ribbon、価格の横に span.soldout "SOLDOUT" も出る）
+#   - 販売中:   content="in stock"（「購入に進む」ボタンあり）
+#   - 削除済み: 404
+_OUT_OF_STOCK = "out of stock"
+
+
+def is_ended(url: str) -> bool:
+    """商品ページを取得し、もう買えない（売り切れ・削除済み）か判定する。取得失敗時は False（表示は継続）。"""
+    try:
+        resp = requests.get(url, headers=_HEADERS, timeout=15)
+        if resp.status_code == 404:
+            return True
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+        meta = soup.select_one('meta[property="product:availability"]')
+        if meta is None:
+            return False   # 構造が想定外なら判定しない（表示は継続）
+        return (meta.get("content") or "").strip().lower() == _OUT_OF_STOCK
+    except Exception as e:
+        print(f"[ラクマ] 売り切れ判定エラー ({url}): {e}")
+        return False
+
+
+# 説明文の取得時に同じページから取った商品写真のURL（商品URL → 写真URLの一覧）。
+# 写真から型番を読む機能（photo_reader）用
+_image_urls: dict[str, list[str]] = {}
+
+
+def get_image_urls(url: str) -> list[str] | None:
+    """商品写真のURL一覧（掲載順）を返す。説明文の取得で同じページを読んでいればそれを使う。
+    取得エラー・ページ構造が想定外なら None。
+
+    写真はスライダーの img.sp-image（img.fril.jp/img/<商品>/l/… の大きい画像）にある。
+    ログインなしの requests で取得できることを確認済み（2026-10時点）。
+    """
+    if url in _image_urls:
+        return _image_urls.pop(url)
+    try:
+        resp = requests.get(url, headers=_HEADERS, timeout=15)
+        resp.raise_for_status()
+        return _parse_images(BeautifulSoup(resp.text, "lxml"))
+    except Exception as e:
+        print(f"[ラクマ] 写真URL取得エラー ({url}): {e}")
+        return None
+
+
+def _parse_images(soup) -> list[str] | None:
+    urls = [im.get("src") or im.get("data-src") or "" for im in soup.select("img.sp-image")]
+    urls = [u for u in urls if u.startswith("http")]
+    return list(dict.fromkeys(urls)) or None
+
+
+def _parse_page(
+    html: str, min_price: int, max_price: int, ex_lower: list[str]
+) -> list[Item]:
+    soup = BeautifulSoup(html, "lxml")
+    items = []
+    for div in soup.select("div.item"):
+        item = _parse_card(div, min_price, max_price, ex_lower)
+        if item:
+            items.append(item)
+    return items
+
+
+def _parse_card(div, min_price: int, max_price: int, ex_lower: list[str]):
+    # 売り切れカードは写真に div.item-box__soldout_ribbon（文言 "SOLD OUT"）が付く（2026-10時点で確認）。
+    # 検索URLの transaction=selling で除かれるが、条件が効かなかった場合に備えてここでも除く
+    if div.select_one(".item-box__soldout_ribbon"):
+        return None
+
+    a = div.select_one("a.link_search_title")
+    if not a:
+        return None
+    title = a.get_text(strip=True)
+    if not title:
+        return None
+    url = a.get("href", "")
+    if not url:
+        return None
+
+    price_box = div.select_one("p.item-box__item-price")
+    if not price_box:
+        return None
+    spans = price_box.select("span[data-content]")
+    if len(spans) < 2:
+        return None
+    raw_price = spans[1].get("data-content", "")
+    if not raw_price.isdigit():
+        return None
+    price = int(raw_price)
+
+    if price > max_price:
+        return None
+    if min_price > 0 and price < min_price:
+        return None
+
+    if ex_lower and any(w in title.lower() for w in ex_lower):
+        return None
+
+    img = div.select_one("img")
+    image_url = img.get("data-original") if img else None
+    if not image_url:
+        noscript_img = div.select_one("noscript img")
+        image_url = noscript_img.get("src") if noscript_img else None
+
+    return Item(
+        title=title,
+        price=price,
+        url=url,
+        source="rakuma",
+        image_url=image_url,
+    )

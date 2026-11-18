@@ -1,0 +1,490 @@
+"""
+Yahoo!オークション スクレイパー
+
+改善点:
+  - 除外キーワード対応（-保存袋 -ショッパー 等）
+  - aucminprice で¥1スタート問題を根本解決（min_buy_price を最低価格フィルターに使用）
+  - data-auction-buynowprice を優先取得し、次点で data-auction-price を使用
+"""
+
+import json
+import re
+import time
+from datetime import datetime
+
+import requests
+from bs4 import BeautifulSoup
+from models import Item
+from scrapers import yahoo_flea_market
+
+_SEARCH_URL = "https://auctions.yahoo.co.jp/search/search"
+
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+}
+
+
+# ── 一時的なエラーのリトライ ──────────────────────────────────────────
+# 500/502/503/429 と接続エラー・タイムアウトは指数バックオフで最大3回リトライする。
+_RETRY_STATUSES = {429, 500, 502, 503}
+_RETRY_DELAYS = (5, 15, 45)     # 秒。1回目→2回目→3回目のリトライ前の待ち時間
+# リトライしても失敗したリクエストが連続したら、以降はリトライせず1回だけ試す
+# （ヤフオク側が実行環境ごと拒否している場合、毎回 65秒×件数 待つのを避ける）。
+# 1回でも成功したらリセットしてリトライを再開する。
+_GIVE_UP_AFTER = 3
+_consecutive_failures = 0
+
+
+def reset_retry_state() -> None:
+    """スキャン開始時に呼ぶ（前回スキャンでリトライを打ち切った状態を持ち越さない）。"""
+    global _consecutive_failures
+    _consecutive_failures = 0
+
+
+class _RetryableStatus(Exception):
+    pass
+
+
+def _get(url: str, params: dict | None = None, timeout: int = 15) -> requests.Response:
+    """GET してレスポンスを返す。一時的なエラーはリトライし、最終的に失敗したら例外を投げる。"""
+    global _consecutive_failures
+    delays = _RETRY_DELAYS if _consecutive_failures < _GIVE_UP_AFTER else ()
+    attempt = 0
+    while True:
+        try:
+            resp = requests.get(url, params=params, headers=_HEADERS, timeout=timeout)
+            if resp.status_code in _RETRY_STATUSES:
+                raise _RetryableStatus(f"{resp.status_code}")
+            resp.raise_for_status()
+            _consecutive_failures = 0
+            return resp
+        except (_RetryableStatus, requests.ConnectionError, requests.Timeout) as e:
+            if attempt >= len(delays):
+                _consecutive_failures += 1
+                if isinstance(e, _RetryableStatus):
+                    resp.raise_for_status()   # 従来と同じ HTTPError メッセージで呼び出し元へ
+                raise
+            wait = delays[attempt]
+            attempt += 1
+            print(f"[Yahoo Auctions] 一時エラー ({e}) → {wait}秒後に再試行 ({attempt}/{len(delays)})")
+            time.sleep(wait)
+
+
+def get_cheap_listings(
+    keyword: str,
+    max_price: int,
+    min_price: int = 0,
+    count: int = 40,
+    exclude_words: list[str] | None = None,
+    immediate_only: bool = False,
+) -> list[Item]:
+    """
+    ヤフオクで keyword を安い順に検索し、仕入れ候補を返す。
+
+    Args:
+        min_price: 最低価格（¥1スタート問題対策。config の min_buy_price を渡す）
+        exclude_words: 除外キーワードリスト（例: ["保存袋", "ショッパー"]）
+        immediate_only: 現在未使用（aucminprice で同等効果を実現）
+    """
+    # 除外キーワードを検索クエリに付加（例: "グッチ バッグ -保存袋 -紙袋"）。
+    # 検索語が長すぎるとヤフオクは 404 を返すため、付けるのは上限文字数に収まる分だけ。
+    # 除外語は全件、取得後のタイトル照合で必ず適用する（_filter_excluded）。
+    search_query = _build_query(keyword, exclude_words)
+
+    try:
+        items = _fetch(search_query, max_price, min_price, count)
+    except requests.HTTPError as e:
+        # 保険: 404 のときは除外語を外したクエリで1回だけ取り直す（除外は取得後の照合で効く）
+        status = e.response.status_code if e.response is not None else None
+        if status != 404 or search_query == keyword:
+            print(f"[Yahoo Auctions] 取得エラー ({keyword}): {e}")
+            return []
+        print(f"[Yahoo Auctions] 検索語が長すぎて 404 → 除外語なしで再取得 ({keyword})")
+        try:
+            items = _fetch(keyword, max_price, min_price, count)
+        except Exception as e2:
+            print(f"[Yahoo Auctions] 取得エラー ({keyword}): {e2}")
+            return []
+    except Exception as e:
+        print(f"[Yahoo Auctions] 取得エラー ({keyword}): {e}")
+        return []
+    return _filter_excluded(items, exclude_words)[:count]
+
+
+def _fetch(search_query: str, max_price: int, min_price: int, count: int) -> list[Item]:
+    params = {
+        "p":           search_query,
+        "va":          search_query,
+        "b":           1,
+        "n":           count,
+        "s1":          "cbids",
+        "o1":          "a",
+        "mode":        1,
+        "aucmaxprice": max_price,
+    }
+    # min_buy_price を aucminprice に渡して¥1スタート品を除外
+    if min_price > 0:
+        params["aucminprice"] = min_price
+
+    resp = _get(_SEARCH_URL, params=params)
+    return _parse_results(resp.text, max_price)
+
+
+def get_description(url: str) -> str | None:
+    """商品詳細ページから説明文を取得する（タイトルに型番がない場合のフォールバック用）。
+    同じページの商品写真のURLも控えておく（get_image_urls で再取得せずに使う）。
+
+    ページ内の #description は表示用に途中（50文字前後）で「...」と省略されている
+    （__NEXT_DATA__ の item.description も同じく省略版）。全文は __NEXT_DATA__ の
+    item.descriptionHtml（出品者が書いたHTML）にあるので、そこからタグを除いたテキストを返す。
+    ログインなしの requests で取得できることを確認済み（2026-10時点）。
+    旧形式のページ（__NEXT_DATA__ が無い・構造が違う）は従来どおり #description から取る。
+    Yahoo!フリマ出品のURL（旧形式で保存されたヤフオクURLを含む）は yahoo_flea_market で取る。
+    """
+    url = to_item_url(url)
+    if yahoo_flea_market.is_item_url(url):
+        return yahoo_flea_market.get_description(url)
+    try:
+        resp = _get(url)
+        _remember_images(url, resp.text)
+        desc = _parse_description(resp.text)
+        if desc is not None:
+            return desc
+        soup = BeautifulSoup(resp.text, "lxml")
+        el = soup.select_one("#description")
+        return el.get_text("\n", strip=True) if el else None
+    except Exception as e:
+        print(f"[Yahoo Auctions] 説明文取得エラー ({url}): {e}")
+        return None
+
+
+def _parse_description(html: str) -> str | None:
+    """__NEXT_DATA__ の item.descriptionHtml（説明文の全文）をテキストにして返す。無ければ None。"""
+    item = _next_data_item(html)
+    desc_html = (item or {}).get("descriptionHtml")
+    if not isinstance(desc_html, str):
+        return None
+    # 表示用のタグ（TABLE/FONT/IMG 等）を除く。行・セルの区切りは改行にして、
+    # 前後の文字と品番がくっつかないようにする（型番の正規表現の \b が効くように）
+    return BeautifulSoup(desc_html, "lxml").get_text("\n", strip=True)
+
+
+# 説明文の取得時に同じページから取った商品写真のURL（商品URL → 写真URLの一覧）。
+# 写真から型番を読む機能（photo_reader）用
+_image_urls: dict[str, list[str]] = {}
+
+
+def get_image_urls(url: str) -> list[str] | None:
+    """商品写真のURL一覧（掲載順）を返す。説明文の取得で同じページを読んでいればそれを使う。
+    取得エラー・ページ構造が想定外なら None。
+
+    写真は __NEXT_DATA__ の props.pageProps.initialState.item.detail.item.img[].image
+    （原寸。i-img900x1200-… 等）にある。ログインなしの requests で取得できることを確認済み（2026-10時点）。
+    """
+    url = to_item_url(url)
+    if yahoo_flea_market.is_item_url(url):
+        return yahoo_flea_market.get_image_urls(url)
+    if url in _image_urls:
+        return _image_urls.pop(url)
+    try:
+        return _parse_images(_get(url).text)
+    except Exception as e:
+        print(f"[Yahoo Auctions] 写真URL取得エラー ({url}): {e}")
+        return None
+
+
+def _remember_images(url: str, html: str) -> None:
+    imgs = _parse_images(html)
+    if imgs:
+        _image_urls[url] = imgs
+
+
+def _parse_images(html: str) -> list[str] | None:
+    imgs = (_next_data_item(html) or {}).get("img")
+    if not isinstance(imgs, list):
+        return None
+    urls = [d.get("image") for d in imgs if isinstance(d, dict) and d.get("image")]
+    return list(dict.fromkeys(urls))
+
+
+def _next_data_item(html: str) -> dict | None:
+    """商品詳細ページの __NEXT_DATA__ から商品情報（initialState.item.detail.item）を返す。
+    写真URL・説明文の全文はここにある。無い・構造が想定外なら None。"""
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
+    if not m:
+        return None
+    try:
+        props = json.loads(m.group(1)).get("props", {})
+    except Exception:
+        return None
+    # pageProps 配下と props 直下の両方に同じものがある（どちらかが無くなっても動くように）
+    for state in (props.get("pageProps", {}).get("initialState"), props.get("initialState")):
+        item = (((state or {}).get("item") or {}).get("detail") or {}).get("item")
+        if isinstance(item, dict):
+            return item
+    return None
+
+
+# 終了済みオークションの商品詳細ページに表示されるバナー文言。
+# 実際に終了済み・出品中のページを取得して確認済み（2026-07-07時点）:
+#   - 終了済み: 本文中に "このオークションは終了しています" が含まれ、
+#     ページ内JSONにも "isClosed":"1" が含まれる
+#   - 出品中:   上記いずれも含まれず "isClosed":"0"
+# テキストの方が構造変化に強いためこちらを一次シグナルとして採用する。
+_ENDED_TEXT = "このオークションは終了しています"
+
+
+def is_ended(url: str) -> bool:
+    """ヤフオクの商品ページを取得し、オークションが終了しているか判定する。取得失敗時は False（表示は継続）を返す。
+
+    - Yahoo!フリマの商品URL（検索結果に混ざるフリマ出品）は yahoo_flea_market.is_ended で判定する。
+    - 旧形式で保存された z〜 の出品（ヤフオクのURLにしていた Yahoo!フリマ出品）は
+      Yahoo!フリマのURLに直してから判定する。
+    - 404（ページが無い＝削除済み・取り消し）は購入できないので終了扱い（404 のURLを出し続けない）。
+    """
+    url = to_item_url(url)
+    if yahoo_flea_market.is_item_url(url):
+        return yahoo_flea_market.is_ended(url)
+    try:
+        resp = requests.get(url, headers=_HEADERS, timeout=15)
+        if resp.status_code == 404:
+            return True
+        resp.raise_for_status()
+        return _ENDED_TEXT in resp.text
+    except Exception as e:
+        print(f"[Yahoo Auctions] 終了判定エラー ({url}): {e}")
+        return False
+
+
+# 旧形式（修正前）で保存された Yahoo!フリマ出品のURL。ヤフオクの出品IDは英字1文字＋数字10桁
+# （例: t1249205314）、Yahoo!フリマは z＋数字9桁（例: z703369578）で、z〜 をヤフオクのURLにすると 404
+_OLD_FLEA_URL_RE = re.compile(r"^https://auctions\.yahoo\.co\.jp/jp/auction/(z\d{9})$")
+
+
+def to_item_url(url: str) -> str:
+    """旧形式で保存された Yahoo!フリマ出品のヤフオクURL（404）を Yahoo!フリマの商品URLに直す。それ以外はそのまま。"""
+    m = _OLD_FLEA_URL_RE.match(url or "")
+    return yahoo_flea_market.item_url(m.group(1)) if m else url
+
+
+# 検索語（p）の文字数上限。2026-10 にログインなしで実測: 除外語付きで 398 文字は 200、
+# 404 文字は 404（URL全体の長さや語数ではなく検索語の文字数で決まる）。余裕を持たせて 300 文字。
+_MAX_QUERY_CHARS = 300
+
+
+def _build_query(keyword: str, exclude_words: list[str] | None) -> str:
+    """除外キーワードを付加した検索クエリを生成する。
+
+    除外語は config の並び順（先頭から）に、検索語全体が _MAX_QUERY_CHARS 文字に
+    収まる分だけ付ける。付けきれなかった除外語も _filter_excluded で取得後に除外される。
+    """
+    query = keyword
+    for w in exclude_words or []:
+        nxt = f"{query} -{w}"
+        if len(nxt) > _MAX_QUERY_CHARS:
+            break
+        query = nxt
+    return query
+
+
+def _filter_excluded(items: list[Item], exclude_words: list[str] | None) -> list[Item]:
+    """タイトルに除外語を含む商品を除く（他の仕入れ先と同じ、大文字小文字を区別しない部分一致）。"""
+    ex_lower = [w.lower() for w in exclude_words] if exclude_words else []
+    if not ex_lower:
+        return items
+    return [it for it in items if not any(w in it.title.lower() for w in ex_lower)]
+
+
+_AUCTION_URL = "https://auctions.yahoo.co.jp/jp/auction/{}"
+
+
+def _parse_results(html: str, max_price: int) -> list[Item]:
+    # 2026-10 中旬頃から検索結果ページが Next.js 化され、HTML に li.Product が無くなった
+    # （商品一覧はクライアント側で描画され、__NEXT_DATA__ の JSON にだけ入っている）。
+    # JSON を一次ソースにし、取れなければ旧 HTML 構造（li.Product）にフォールバックする。
+    items = _parse_next_data(html, max_price)
+    if items is not None:
+        return items
+    soup = BeautifulSoup(html, "lxml")
+    items = []
+    for li in soup.select("li.Product"):
+        item = _parse_product(li, max_price)
+        if item:
+            items.append(item)
+    return items
+
+
+def _parse_next_data(html: str, max_price: int) -> list[Item] | None:
+    """__NEXT_DATA__ から商品一覧を取り出す。JSON が無い・形が違う場合は None。"""
+    m = re.search(
+        r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S
+    )
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1))
+    except ValueError:
+        return None
+    raw = None
+    for root in (data.get("props", {}).get("pageProps", {}), data.get("props", {})):
+        try:
+            raw = root["initialState"]["search"]["items"]["listing"]["items"]
+            break
+        except (KeyError, TypeError):
+            continue
+    if not isinstance(raw, list):
+        return None
+    items = []
+    for d in raw:
+        if isinstance(d, dict):
+            item = _parse_json_item(d, max_price)
+            if item:
+                items.append(item)
+    return items
+
+
+def _to_int(v) -> int | None:
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return int(v)
+    if isinstance(v, str) and v.isdigit():
+        return int(v)
+    return None
+
+
+def _parse_json_item(d: dict, max_price: int):
+    auction_id = str(d.get("auctionId") or "").strip()
+    title = str(d.get("title") or "").strip()
+    if not auction_id or not title:
+        return None
+
+    # ヤフオクの検索結果には Yahoo!フリマ（旧PayPayフリマ）の出品も混ざる
+    # （isFleamarketItem=true / seller.type=FLEAMARKET。ID は z＋数字9桁、例: z703369578）。
+    # これをヤフオクのURL（/jp/auction/z…）にすると 404 で説明文も写真も取れないため、
+    # 検索結果ページのリンクと同じ Yahoo!フリマの商品URLにし、仕入れ先も yahoo_flea にする
+    # （説明文・写真は yahoo_flea_market の取得関数で取れ、Yahoo!フリマ検索の同じ出品とURLで重複除去される）。
+    # 2026-10 にログインなしで確認: ヤフオクURLは 404、Yahoo!フリマURLは説明文・写真とも取得できる
+    seller = d.get("seller") if isinstance(d.get("seller"), dict) else {}
+    seller_type = seller.get("type")
+    is_flea = bool(d.get("isFleamarketItem")) or seller_type == "FLEAMARKET"
+    if is_flea:
+        url = yahoo_flea_market.item_url(auction_id)
+    else:
+        url = _AUCTION_URL.format(auction_id)
+
+    # 旧 HTML 版と同じく、即決価格があればそちらを優先、無ければ現在価格
+    buynow = _to_int(d.get("buyNowPrice"))
+    current = _to_int(d.get("price"))
+    has_buynow = buynow is not None and buynow > 0
+    if has_buynow:
+        price = buynow
+    elif current is not None and current > 0:
+        price = current
+    else:
+        return None
+    if price > max_price:
+        return None
+
+    image_url = d.get("imageUrl") or None
+
+    # 終了時刻（UNIX秒）: endTime は "2026-10-27T22:01:19+09:00" 形式。
+    # 取れなければ etc 内の etm=<UNIX秒> を使う。
+    # Yahoo!フリマ出品の endTime は掲載期限（出品から1年後）でオークションの終了ではないので使わない
+    # （Yahoo!フリマ検索の出品と同じく終了時刻なし）
+    end_time = None
+    et = d.get("endTime") if not is_flea else None
+    if isinstance(et, str) and et:
+        try:
+            end_time = int(datetime.fromisoformat(et).timestamp())
+        except ValueError:
+            end_time = None
+    if end_time is None and not is_flea:
+        em = re.search(r"(?:^|,)etm=(\d+)", str(d.get("etc") or ""))
+        if em:
+            end_time = int(em.group(1))
+
+    is_auction = not has_buynow and not is_flea
+
+    return Item(
+        title=title,
+        price=price,
+        url=url,
+        source="yahoo_flea" if is_flea else "yahoo_auctions",
+        image_url=image_url,
+        end_time=end_time,
+        is_auction=is_auction,
+    )
+
+
+def _parse_product(li, max_price: int):
+    a = li.select_one("a[data-auction-title]")
+    if not a:
+        return None
+
+    title = a.get("data-auction-title", "").strip()
+    if not title:
+        return None
+
+    url = to_item_url(a.get("href", ""))
+    if not url:
+        return None
+
+    # Product__bonus div に即決価格 (data-auction-buynowprice) がある場合は優先使用
+    bonus = li.select_one(".Product__bonus, [data-auction-buynowprice]")
+    buynow_attr = bonus.get("data-auction-buynowprice", "") if bonus else ""
+    price_attr  = a.get("data-auction-price", "")
+
+    if buynow_attr.isdigit() and int(buynow_attr) > 0:
+        # 即決価格が設定されている場合はそちらを使用
+        price = int(buynow_attr)
+    elif price_attr.isdigit() and int(price_attr) > 0:
+        # 現在の入札価格を使用（aucminprice フィルターにより¥1品は除外済み）
+        price = int(price_attr)
+    else:
+        price = None
+
+    if price is None:
+        price_el = li.select_one("[class*='price'], [class*='Price']")
+        if price_el:
+            price = _parse_price_text(price_el.get_text())
+
+    if price is None or price <= 0 or price > max_price:
+        return None
+
+    image_url = a.get("data-auction-img") or None
+
+    # 終了時刻: 検索結果の .Product__bonus に data-auction-endtime（UNIX秒）が入っている
+    # （2026-10 時点で確認。表示上の「残り 5日」等は .Product__time）
+    end_time = None
+    endtime_attr = bonus.get("data-auction-endtime", "") if bonus else ""
+    if endtime_attr.isdigit():
+        end_time = int(endtime_attr)
+    # 即決価格あり（定額・即決）やフリマ出品は「オークション形式」ではない扱い
+    is_flea = bool(a.get("data-auction-isflea"))
+    has_buynow = buynow_attr.isdigit() and int(buynow_attr) > 0
+    is_auction = not has_buynow and not is_flea
+    # Yahoo!フリマの出品（リンク先が Yahoo!フリマ）は仕入れ先も yahoo_flea にする（_parse_json_item と同じ）
+    on_flea = yahoo_flea_market.is_item_url(url)
+
+    return Item(
+        title=title,
+        price=price,
+        url=url,
+        source="yahoo_flea" if on_flea else "yahoo_auctions",
+        image_url=image_url,
+        end_time=None if on_flea else end_time,
+        is_auction=is_auction,
+    )
+
+
+def _parse_price_text(text: str):
+    nums = re.sub(r"[^\d]", "", text)
+    return int(nums) if nums else None

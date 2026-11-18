@@ -1,0 +1,303 @@
+"""
+利益計算エンジン
+
+利益の計算式:
+  純売上 = メルカリ相場平均 × (1 - メルカリ手数料率) - 発送費用
+  利益   = 純売上 - 仕入れ値
+"""
+
+import statistics
+from typing import Optional
+
+import database
+import condition_checker
+from models import Deal, Item, MarketPrice
+from scrapers import mercari as mercari_scraper
+
+
+# ── 同一スキャン内のメモ（キャッシュキー → MarketPrice / None）──────────────
+# DBキャッシュ(price_cache)は売却実績0件の結果を保存しないため、0件の型番/モデルは
+# 同じスキャン内で何度も取りに行っていた（例: 同じ型番の出品が複数ある場合）。
+# スキャン開始時に reset_session() で空にし、0件(None)も含めて1スキャン1回にする。
+_session_memo: dict[str, Optional[MarketPrice]] = {}
+# スキャン統計（ログ末尾のサマリー用）
+stats = {"fetch": 0, "db_cache": 0, "memo": 0, "zero": 0}
+
+
+def reset_session() -> None:
+    """スキャン開始時に呼ぶ。同一スキャン内メモと統計をリセットする。"""
+    _session_memo.clear()
+    for k in stats:
+        stats[k] = 0
+
+
+def get_market_price(
+    page,
+    keyword: str,
+    sample_count: int = 30,
+    cache_hours: int = 12,
+    exclude_words: list[str] | None = None,
+    required_words: list[str] | None = None,
+    price_min: int | None = None,
+    price_max: int | None = None,
+    title_filter=None,
+    filter_key: str = "",
+    alt_keywords: list[str] | None = None,
+    min_samples: int = 1,
+) -> Optional[MarketPrice]:
+    """メルカリ相場を取得し、売却済みが min_samples 件未満なら相場なし（None）とする。
+    引数は _get_market_price を参照。"""
+    market = _get_market_price(
+        page, keyword, sample_count=sample_count, cache_hours=cache_hours,
+        exclude_words=exclude_words, required_words=required_words,
+        price_min=price_min, price_max=price_max, title_filter=title_filter,
+        filter_key=filter_key, alt_keywords=alt_keywords,
+    )
+    if market is not None and market.sample_count < min_samples:
+        print(f"  [スキップ] {keyword}: 売却済み {market.sample_count}件 < {min_samples}件 → 相場なし")
+        return None
+    return market
+
+
+def _get_market_price(
+    page,
+    keyword: str,
+    sample_count: int = 30,
+    cache_hours: int = 12,
+    exclude_words: list[str] | None = None,
+    required_words: list[str] | None = None,
+    price_min: int | None = None,
+    price_max: int | None = None,
+    title_filter=None,
+    filter_key: str = "",
+    alt_keywords: list[str] | None = None,
+) -> Optional[MarketPrice]:
+    """メルカリ相場を取得（キャッシュ優先）。price_min/price_max で価格帯を限定できる。
+    required_words: 同名称が別カテゴリーにも存在する場合の混入防止
+    （例: カルティエ「トリニティ」=指輪/サングラス両方に存在するため相場が汚染されうる）。
+    page: 呼び出し元（main.py）で起動・使い回している Playwright ページ
+    （型番/価格帯ごとに毎回ブラウザを起動しないため）。
+    title_filter / filter_key: 売却済みタイトルの追加条件と、そのキャッシュ識別子
+    （例: モデル名「ディオニシオ」で照合 → filter_key="model:ディオニシオ"）。
+    alt_keywords: 同じモデルの別表記での検索語（例: keyword="デュベティカ ディオニシオ",
+    alt_keywords=["デュベティカ DIONISIO"]）。全検索語の売却済みを商品URLで重複除去して
+    合算してから相場を出す。キャッシュキーは「検索語1+検索語2」になり、単独検索の結果とは混ざらない。
+    """
+    keywords = [keyword] + [k for k in (alt_keywords or []) if k and k != keyword]
+    label = " + ".join(keywords)
+    # キャッシュキー: 価格帯・必須ワード条件が異なれば別エントリにする
+    cache_suffix = f"|{price_min or 0}-{price_max or 0}|{','.join(required_words or [])}"
+    if filter_key:
+        cache_suffix += f"|{filter_key}"
+    base_key = "+".join(keywords)
+    cache_key = f"{base_key}{cache_suffix}" if (price_min or price_max or required_words or filter_key) else base_key
+
+    if cache_key in _session_memo:
+        stats["memo"] += 1
+        memo = _session_memo[cache_key]
+        if memo is None:
+            print(f"  [スキップ] {label}: このスキャンで取得済み（売却実績なし）")
+        else:
+            print(f"  [キャッシュ] {label}: 中央値 ¥{memo.median_price:,}（このスキャンで取得済み）")
+        return memo
+
+    cached = database.get_cached_price(cache_key, max_age_hours=cache_hours)
+    if cached:
+        stats["db_cache"] += 1
+        print(f"  [キャッシュ] {label}: 中央値 ¥{cached['median_price']:,}")
+        market = MarketPrice(
+            keyword=keyword,
+            avg_price=cached["avg_price"],
+            median_price=cached["median_price"],
+            min_price=cached["min_price"],
+            max_price=cached["max_price"],
+            sample_count=cached["sample_count"],
+        )
+        _session_memo[cache_key] = market
+        return market
+
+    range_str = f" (¥{price_min:,}〜¥{price_max:,})" if (price_min or price_max) else ""
+    if len(keywords) == 1:
+        print(f"  [Mercari] {keyword}{range_str} の売却済み価格を取得中...")
+        stats["fetch"] += 1
+        prices = mercari_scraper.get_sold_prices(
+            page, keyword, count=sample_count, exclude_words=exclude_words,
+            required_words=required_words, price_min=price_min, price_max=price_max,
+            title_filter=title_filter,
+        )
+    else:
+        # カタカナ名・英字名などの複数表記で取得し、商品URLで重複を除いて合算する
+        prices = []
+        seen: set[str] = set()
+        for kw in keywords:
+            print(f"  [Mercari] {kw}{range_str} の売却済み価格を取得中...")
+            stats["fetch"] += 1
+            got = mercari_scraper.get_sold_items(
+                page, kw, count=sample_count, exclude_words=exclude_words,
+                required_words=required_words, price_min=price_min, price_max=price_max,
+                title_filter=title_filter,
+            )
+            added = 0
+            for r in got:
+                key = r.get("url") or f"{r.get('title', '')}|{r['price']}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                prices.append(r["price"])
+                added += 1
+            print(f"    → {len(got)}件（重複除外後 +{added}件）")
+
+    if len(prices) < 1:
+        print(f"  [警告] {label}{range_str}: サンプル不足 ({len(prices)}件)")
+        stats["zero"] += 1
+        _session_memo[cache_key] = None
+        return None
+
+    # ── Step1: 上下10%カット（偽物・限定品などの極端な外れ値を除去）
+    prices.sort()
+    n = len(prices)
+    cut = max(1, n // 10)
+    trimmed = prices[cut : n - cut] if n - cut > cut else prices
+
+    # ── Step2: 仮平均を算出し、±20%範囲内に絞る
+    # 例: 仮平均¥100,000 → ¥80,000〜¥120,000 のみ採用
+    # 同一キーワードで別モデル・別状態が混在する場合の相場ブレを抑制
+    rough_avg = statistics.mean(trimmed)
+    low  = rough_avg * 0.80
+    high = rough_avg * 1.20
+    tightened = [p for p in trimmed if low <= p <= high]
+
+    # サンプルが3件以上残れば絞り込み後を採用、少なすぎる場合はStep1結果を使用
+    final = tightened if len(tightened) >= 3 else trimmed
+
+    avg = int(statistics.mean(final))
+    med = int(statistics.median(final))
+
+    market = MarketPrice(
+        keyword=keyword,
+        avg_price=avg,
+        median_price=med,
+        min_price=min(final),
+        max_price=max(final),
+        sample_count=len(prices),
+    )
+
+    _session_memo[cache_key] = market
+    database.cache_price(
+        cache_key, avg, med, market.min_price, market.max_price, len(prices),
+        base_keyword=keyword,
+    )
+    band = f"¥{int(low):,}〜¥{int(high):,}"
+    print(f"  [Mercari] {label}{range_str}: 中央値 ¥{med:,} / 平均 ¥{avg:,}"
+          f" ({len(final)}/{len(prices)}件, ±20%帯: {band})")
+    return market
+
+
+def calculate_deal(
+    item: Item,
+    keyword: str,
+    market: MarketPrice,
+    commission_rate: float = 0.10,
+    shipping_cost: int = 700,
+    min_profit: int = 3000,
+    condition=None,
+) -> Optional[Deal]:
+    """仕入れアイテムとメルカリ相場を比較して利益を計算する。
+    condition: 状態（condition_checker.ConditionResult）。省略時はタイトルから判定する"""
+    # ── 価格サニティチェック ──────────────────────────────────
+    # 仕入れ値が中央値の20%未満 = 相場と乖離しすぎ
+    # → レプリカ・別カテゴリー誤混入・激しい破損品の可能性が高い
+    # 例: エルメス バッグ中央値¥398,000 → 仕入れ値¥30,000（7.5%）は除外
+    SANITY_RATIO = 0.20
+    if item.price < market.median_price * SANITY_RATIO:
+        return None
+
+    # 商品状態をタイトルから判定（condition を渡されたら＝写真の判定と組み合わせ済みならそれを使う）
+    text_cond = condition_checker.check(item.title)
+    cond = condition or text_cond
+    # 写真で状態を確認する予定のスキャン（photo_reader）では、タイトルで状態不明の出品も
+    # 「目立った傷なし」（1.00）と仮定して候補に残す。写真の確認後に main.py で計算し直す
+    # （写真が確認できなかった出品はタイトルの状態＝0.90 で計算し直すので、仮定のまま残ることはない）
+    if condition is None and _flags["photo_check"] and condition_checker.is_unknown(text_cond):
+        cond = condition_checker.ConditionResult(text_cond.label, 1.00, text_cond.rank)
+
+    # 中央値 × 状態補正係数 = 販売推定価格
+    # 例: 中央値¥50,000 × 美品1.05 = ¥52,500
+    #     中央値¥50,000 × 傷あり0.60 = ¥30,000
+    reference_price = int(market.median_price * cond.factor)
+
+    net_revenue = int(reference_price * (1 - commission_rate)) - shipping_cost
+    profit = net_revenue - item.price
+
+    if profit < min_profit:
+        return None
+
+    roi = profit / item.price * 100 if item.price > 0 else 0
+
+    return Deal(
+        item=item,
+        keyword=keyword,
+        mercari_avg_price=reference_price,
+        net_revenue=net_revenue,
+        estimated_profit=profit,
+        roi_percent=round(roi, 1),
+        condition_label=cond.label,
+        condition_factor=cond.factor,
+        market=market,
+        text_condition_label=text_cond.label,
+    )
+
+
+# 写真で状態を確認するスキャンか（main.scan() が photo_reader の有効/無効に合わせて設定する）
+_flags = {"photo_check": False}
+
+
+def set_photo_check(on: bool) -> None:
+    _flags["photo_check"] = bool(on)
+
+
+def apply_photo_condition(deal: Deal, photo: Optional[dict], commission_rate: float,
+                          shipping_cost: int, min_profit: int) -> Optional[Deal]:
+    """写真の状態判定（photo。None なら未確認）とタイトルの状態を保守的に組み合わせて利益を計算し直す。
+    利益が min_profit を下回れば None"""
+    if deal.market is None:
+        return deal
+    cond = condition_checker.combine(condition_checker.check(deal.item.title), photo)
+    new = calculate_deal(deal.item, deal.keyword, deal.market, commission_rate=commission_rate,
+                         shipping_cost=shipping_cost, min_profit=min_profit, condition=cond)
+    if new is None:
+        return None
+    new.brand, new.model, new.category = deal.brand, deal.model, deal.category
+    new.search_keyword = deal.search_keyword
+    new.photo_condition = photo
+    new.free_info = deal.free_info   # フリーリサーチの相場の根拠など（free_research）
+    return new
+
+
+def find_deals(
+    items: list[Item],
+    keyword: str,
+    market: MarketPrice,
+    commission_rate: float,
+    shipping_cost: int,
+    min_profit: int,
+    min_buy_price: int = 0,
+) -> list[Deal]:
+    """仕入れ候補リストからお得案件を絞り込む（最低仕入れ価格未満は除外）。
+    同一URLの重複はこの関数内で除去する。
+    """
+    deals = []
+    seen_urls: set[str] = set()
+    for item in items:
+        if item.price < min_buy_price:
+            continue
+        if item.url in seen_urls:   # 同一URLの重複を除去
+            continue
+        seen_urls.add(item.url)
+        deal = calculate_deal(
+            item, keyword, market, commission_rate, shipping_cost, min_profit
+        )
+        if deal:
+            deals.append(deal)
+    deals.sort(key=lambda d: d.estimated_profit, reverse=True)
+    return deals
