@@ -51,7 +51,7 @@ main() {
     sync_brands
 
     # ---- 5) 起動 ----
-    echo "利益発見ツール2 を起動します（$URL）…"
+    echo "利益発見ツール2 を起動します（${URL}）…"
     export RIEKI2_PORT="$PORT"
     ./venv/bin/python app.py
 }
