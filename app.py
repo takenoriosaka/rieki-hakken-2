@@ -41,6 +41,7 @@ import model_extractor   # noqa: E402
 import my_list           # noqa: E402
 import analyzer          # noqa: E402
 import local_inspector   # noqa: E402
+import mercari_query     # noqa: E402
 import ocr_reader        # noqa: E402
 import photo_reader      # noqa: E402
 
@@ -512,6 +513,8 @@ def _deal_to_dict(d) -> dict:
         # フリーリサーチモードの相場の根拠・信頼度・性別・注目ポイント（通常のモードでは None）
         "free_info": d.free_info,
         "photo_model": getattr(d, "photo_model", None),
+        # 「メルカリ相場を見る」「📋 コピー」の検索語 {keyword, category_ids}（mercari_query。失敗・昔の結果は None）
+        "mercari_query": mercari_query.for_deal(d),
     }
 
 

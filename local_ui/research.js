@@ -996,11 +996,15 @@ function renderResults() {
     // フリーリサーチ（型番なし）は相場を出した検索語（例: ポールスミス セットアップ メンズ）でメルカリを開く
     const freeQ = d.free_info && !d.model && d.free_info.genre_market ? (d.free_info.genre_market.queries || [])[0] : '';
     const searchText = freeQ || [d.brand, d.model].filter(Boolean).join(' ') || d.keyword;
-    const searchTextAttr = esc(JSON.stringify(searchText));
+    // サーバーが作った検索語（ブランド + モデル名/型番 + 種類 + 特徴1つ。mercari_query.py）。無い昔の結果は従来の検索語
+    const mq = d.mercari_query && d.mercari_query.keyword ? d.mercari_query : null;
+    const mercariText = mq ? mq.keyword : searchText;
+    const searchTextAttr = esc(JSON.stringify(mercariText));
     const urlAttr = esc(JSON.stringify(d.url || ''));
-    const freeCats = freeQ ? (d.free_info.genre_market.category_ids || []) : [];
-    const mercariSearchUrl = `https://jp.mercari.com/search?keyword=${encodeURIComponent(searchText)}&status=sold_out&sort=created_time&order=desc&item_types=1` +
+    const freeCats = mq ? (mq.category_ids || []) : (freeQ ? (d.free_info.genre_market.category_ids || []) : []);
+    const mercariSearchUrl = `https://jp.mercari.com/search?keyword=${encodeURIComponent(mercariText)}&status=sold_out&sort=created_time&order=desc&item_types=1` +
       (freeCats.length ? `&category_id=${freeCats.join(',')}` : '');
+    const mercariTitle = `メルカリで『${mercariText}』を売り切れ・新しい順で検索`;
     const kindSearchUrl = `https://shop.kind.co.jp/search?q=${encodeURIComponent(searchText)}`;  // 手動で開くだけ（ツールからは取得しない）
     return `
     <article class="card">
@@ -1034,8 +1038,8 @@ function renderResults() {
         <div class="card-brand">${esc(d.brand || '')}</div>
         <div class="card-title" title="${esc(d.title)}">${esc(d.title)}</div>
         <div class="card-actions">
-          <button type="button" class="btn-sub" onclick="copyDealText(this, ${searchTextAttr})">📋 コピー</button>
-          <a class="btn-sub btn-mercari" href="${esc(mercariSearchUrl)}" target="_blank" rel="noopener noreferrer">メルカリ相場を見る</a>
+          <button type="button" class="btn-sub" title="${esc(`検索語『${mercariText}』をコピー`)}" onclick="copyDealText(this, ${searchTextAttr})">📋 コピー</button>
+          <a class="btn-sub btn-mercari" href="${esc(mercariSearchUrl)}" title="${esc(mercariTitle)}" target="_blank" rel="noopener noreferrer">メルカリ相場を見る</a>
           <a class="btn-sub btn-kind" href="${esc(kindSearchUrl)}" target="_blank" rel="noopener noreferrer">KINDで見る</a>
           <button type="button" class="btn-sub btn-url" title="出品URLをコピー（Claude Code に貼って写真を確認してもらう用）" onclick="copyDealText(this, ${urlAttr})">🔗 URLをコピー</button>
         </div>
