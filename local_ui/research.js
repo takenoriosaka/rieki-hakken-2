@@ -1002,7 +1002,8 @@ function renderResults() {
     const searchTextAttr = esc(JSON.stringify(mercariText));
     const urlAttr = esc(JSON.stringify(d.url || ''));
     const freeCats = mq ? (mq.category_ids || []) : (freeQ ? (d.free_info.genre_market.category_ids || []) : []);
-    const mercariSearchUrl = `https://jp.mercari.com/search?keyword=${encodeURIComponent(mercariText)}&status=sold_out&sort=created_time&order=desc&item_types=1` +
+    // 2026-11-23 メルカリ画面で「売り切れ」「個人」を選んだときの値に合わせた（status=sold_out|trading、item_types=mercari）
+    const mercariSearchUrl = `https://jp.mercari.com/search?keyword=${encodeURIComponent(mercariText)}&status=sold_out%7Ctrading&sort=created_time&order=desc&item_types=mercari` +
       (freeCats.length ? `&category_id=${freeCats.join(',')}` : '');
     const mercariTitle = `メルカリで『${mercariText}』を売り切れ・新しい順で検索`;
     const kindSearchUrl = `https://shop.kind.co.jp/search?q=${encodeURIComponent(searchText)}`;  // 手動で開くだけ（ツールからは取得しない）
