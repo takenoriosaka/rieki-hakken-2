@@ -223,10 +223,14 @@ def _playwright_sold_prices(
     price_min: int | None = None, price_max: int | None = None,
     title_filter=None, category_ids: list[int] | None = None,
 ) -> list[dict]:
-    # item_types=1 : フリマ（個人C2C）のみ。メルカリショップス（item_types=2）を除外
+    # status=sold_out|trading : 売り切れ＋取引中（どちらも買い手が付いた＝売れた価格）。販売中は含まない
+    # item_types=mercari : フリマ（個人C2C）のみ。メルカリショップスを除外
+    # 2026-11-24: メルカリ画面で「売り切れ」「個人」を選んだときの正式な値に揃えた。旧値
+    # （status=sold_out&item_types=1）もメルカリ側で同じ検索条件（STATUS_SOLD_OUT+STATUS_TRADING /
+    # ITEM_TYPE_MERCARI）に読み替えられていて、販売中の混入は無かったことを確認済み
     url = (
         f"https://jp.mercari.com/search"
-        f"?keyword={keyword}&status=sold_out&sort=created_time&order=desc&item_types=1"
+        f"?keyword={keyword}&status=sold_out%7Ctrading&sort=created_time&order=desc&item_types=mercari"
     )
     if category_ids:
         url += "&category_id=" + ",".join(str(c) for c in category_ids)
@@ -239,6 +243,16 @@ def _playwright_sold_prices(
     _wait_for_items(page)
 
     raw = page.evaluate(_EXTRACT_SOLD_JS)
+    # 安全策: 検索結果のサムネイルの「SOLD」表示（売り切れ・取引中の両方に付く）が無い出品＝販売中は相場に入れない。
+    # ただし1件も SOLD 表示が見つからないときはメルカリの画面構造が変わったとみなし、従来どおり全件使う（警告のみ）
+    if raw and any("sold" in r for r in raw):
+        if not any(r.get("sold") for r in raw):
+            print(f"[Mercari] 警告: 売り切れ検索で SOLD 表示が1件も見つかりません（画面構造の変化？）: {keyword}")
+        else:
+            n_before = len(raw)
+            raw = [r for r in raw if r.get("sold")]
+            if len(raw) < n_before:
+                print(f"[Mercari] SOLD 表示の無い出品 {n_before - len(raw)}件を相場から除外: {keyword}")
 
     # タイトルに除外ワードが含まれるものを除去（Mercariは -word 構文非対応のため後処理）
     # required_words: 同名称が別カテゴリーにも存在する場合の混入防止（例: トリニティ=指輪/サングラス）
@@ -275,11 +289,11 @@ def _playwright_cheap_listings(
     page, keyword: str, max_price: int, count: int,
     exclude_words: list[str] | None = None,
 ) -> list[Item]:
-    # item_types=1 : フリマ（個人C2C）のみ。メルカリショップスを除外
+    # item_types=mercari : フリマ（個人C2C）のみ。メルカリショップスを除外（旧値 item_types=1 と同じ条件）
     url = (
         f"https://jp.mercari.com/search"
         f"?keyword={keyword}&status=on_sale&sort=price&order=asc"
-        f"&price_max={max_price}&item_types=1"
+        f"&price_max={max_price}&item_types=mercari"
     )
 
     page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -427,10 +441,17 @@ _EXTRACT_SOLD_JS = """
             const text = priceEl.textContent.replace(/[^\\d]/g, '');
             const n = parseInt(text, 10);
             if (n > 0) {
+                // 売り切れ・取引中のサムネイルには SOLD のステッカー（data-testid="item-tile-sticker"）が付き、
+                // 画像の alt が「…のサムネイル 売り切れ」になる（2026-11 確認）。販売中には付かない
+                const sticker = cell.querySelector('[data-testid="item-tile-sticker"]');
+                const img = cell.querySelector('img');
+                const alt = img ? (img.getAttribute('alt') || '') : '';
+                const sold = !!(sticker && /SOLD/i.test(sticker.textContent || '')) || /売り切れ\\s*$/.test(alt);
                 items.push({
                     title: titleEl ? titleEl.textContent.trim() : '',
                     price: n,
                     url: a ? a.href : '',
+                    sold: sold,
                 });
             }
         }
