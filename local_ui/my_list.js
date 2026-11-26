@@ -10,7 +10,7 @@ const ml = {
   highlight: null, hlTimer: null, quickTimer: null, flashTimer: null,
 };
 const ML_INTRO_KEY = 'rieki-mylist-intro-collapsed-v1';
-const ML_FILTERS = [['all', 'すべて'], ['on', 'オンだけ'], ['off', 'オフだけ']];
+const ML_FILTERS = [['all', 'すべて'], ['on', 'リサーチするだけ'], ['off', 'しないだけ']];
 const ML_TARGET_KEY = 'rieki-mylist-target-v1';
 
 function isListView() { return !!$('listView') && !$('listView').hidden; }
@@ -31,8 +31,8 @@ function mlRenderLinks() {
     if (!ML) { el.hidden = true; return; }
     const total = ML.entries.length, on = ML.entries.filter(e => e.enabled).length;
     el.hidden = false;
-    el.innerHTML = `<span class="ml-link-text">⭐ マイブランド：登録 <b>${total}</b>件（オン <b>${on}</b>件）</span><span class="ml-link-act">✏️ 登録・編集する</span>`;
-    el.setAttribute('aria-label', `マイブランド 登録${total}件 オン${on}件。登録・編集する`);
+    el.innerHTML = `<span class="ml-link-text">⭐ マイブランド：登録 <b>${total}</b>件（リサーチする <b>${on}</b>件）</span><span class="ml-link-act">✏️ 登録・編集する</span>`;
+    el.setAttribute('aria-label', `マイブランド 登録${total}件 リサーチする${on}件。登録・編集する`);
   });
 }
 
@@ -136,7 +136,7 @@ function renderList() {
   if (!ML) { $('mlCount').textContent = 'マイブランドを読み込めませんでした（サーバーを再起動してください）'; return; }
   const total = ML.entries.length;
   const on = ML.entries.filter(e => e.enabled).length;
-  $('mlCount').innerHTML = `登録 <b>${total}</b>件 ・ オン <b>${on}</b>件`;
+  $('mlCount').innerHTML = `登録 <b>${total}</b>件 ・ リサーチする <b>${on}</b>件`;
   $('mlFilterSeg').innerHTML = ML_FILTERS.map(([k, l]) => `<button type="button" class="${ml.filter === k ? 'on' : ''}" data-ml-filter="${k}">${l}</button>`).join('');
   if (document.activeElement !== $('mlSearch')) $('mlSearch').value = ml.search;
   renderListQuick();
@@ -196,7 +196,7 @@ async function mlQuickAdd() {
   };
   const name = f.name;
   const ferr = mlFieldsError(f);
-  if (ferr) { mlQuickMsg(ferr, false); (name ? (ferr.startsWith('下限') ? $('mlQuickMin') : $('mlQuickMax')) : $('mlQuickName')).focus(); return; }
+  if (ferr) { mlQuickMsg(ferr, false); if (name) $('mlQuickAdv').open = true; (name ? (ferr.startsWith('下限') ? $('mlQuickMin') : $('mlQuickMax')) : $('mlQuickName')).focus(); return; }
   if (!ML) { mlQuickMsg('マイブランドを読み込めませんでした（サーバーを再起動してください）', false); return; }
   mlQuickBusy = true;
   $('mlQuickAddBtn').disabled = true;
@@ -211,7 +211,8 @@ async function mlQuickAdd() {
   ml.search = ''; ml.filter = 'all';
   mlHighlight(r.entry && r.entry.id);
   renderList();
-  mlQuickMsg(`✓ 「${r.entry ? r.entry.name : name}」を登録しました（リサーチする: オン）`, true);
+  $('mlQuickAdv').open = false;
+  mlQuickMsg(`✓ 「${r.entry ? r.entry.name : name}」を登録しました（「リサーチする」になっています）`, true);
   const row = r.entry && document.querySelector(`[data-ml-row="${CSS.escape(r.entry.id)}"]`);
   if (row) row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   $('mlQuickName').focus();
@@ -337,10 +338,10 @@ function renderListGroups() {
   const keepNg = $('mlNg_e') ? $('mlNg_e').value : '';
   $('mlGroups').innerHTML = shown.length ? shown.map(mlEntryHtml).join('') : (searching && ML.entries.length
     ? `<div class="ml-empty"><div class="ml-empty-title">条件に合うブランドがありません</div>
-        <div>検索の文字や「すべて / オンだけ / オフだけ」を変えてみてください。新しく登録するときは、上の<b>「ブランド」</b>に入れて<b>「＋ 追加」</b>を押してください。</div>
+        <div>検索の文字や「すべて / リサーチするだけ / しないだけ」を変えてみてください。新しく登録するときは、上の<b>「ブランド」</b>に入れて<b>「＋ 登録する」</b>を押してください。</div>
         <button type="button" class="ghost-btn ml-small" data-ml-goquick="1">↑ ブランドを登録する</button></div>`
     : `<div class="ml-empty"><div class="ml-empty-title">まだブランドが登録されていません</div>
-        <div>上の<b>「ブランド」</b>に仕入れたいブランドを入れて、<b>「＋ 追加」</b>を押してください（Enterキーでも追加できます）。</div>
+        <div>上の<b>「ブランド」</b>に仕入れたいブランドを入れて、<b>「＋ 登録する」</b>を押してください（Enterキーでも登録できます）。</div>
         <button type="button" class="ghost-btn ml-small" data-ml-goquick="1">↑ ブランドを登録する</button></div>`);
   if ($('mlNg_e')) $('mlNg_e').value = keepNg;
 }
@@ -356,7 +357,7 @@ function mlTargetLabel() {
   const t = ml.target || '';
   const n = mlTargetEntries().length;
   if (t.startsWith('id:')) { const e = mlTargetEntries()[0]; return e ? `「${e.name}」だけ` : '（削除されたブランド）'; }
-  return `オンのブランドすべて（${n}件）`;
+  return `「リサーチする」のブランドすべて（${n}件）`;
 }
 function mlEstimate() {
   const entries = mlTargetEntries();
@@ -381,7 +382,7 @@ const mlFmtMin = m => (m >= 60 ? `${Math.floor(m / 60)}時間${m % 60 ? (m % 60)
 function renderListResearch() {
   if (!OPTIONS || !ML) return;
   const sel = $('mlTarget');
-  const opts = [['', `オンのブランドすべて（${ML.entries.filter(e => e.enabled).length}件）`]];
+  const opts = [['', `「リサーチする」のブランドすべて（${ML.entries.filter(e => e.enabled).length}件）`]];
   if (ml.target.startsWith('id:')) {
     const e = ML.entries.find(x => x.id === ml.target.slice(3));
     if (e) opts.push([ml.target, `「${e.name}」だけ`]);
@@ -421,9 +422,9 @@ function renderListResearch() {
 
 function listError() {
   const ents = mlTargetEntries();
-  if (!ents.length) return ml.target ? 'そのブランドは見つかりません（削除されたかもしれません）' : 'オンのブランドがありません（ブランドのスイッチを「リサーチする」にしてください）';
+  if (!ents.length) return ml.target ? 'そのブランドは見つかりません（削除されたかもしれません）' : '「リサーチする」のブランドがありません（一覧のスイッチを「リサーチする」にしてください）';
   if (!ents.some(e => (e.effective_genres || []).length || (e.models || []).length || (e.model_numbers || []).length)) return '調べるジャンルがありません（ブランドの「✏️ 編集」でジャンルを選んでください）';
-  if (!state.sources.size) return '仕入れ先を1つ以上選んでください';
+  if (!state.sources.size) return '仕入れ先を1つ以上選んでください（「詳しい設定」の中）';
   if (Number(free.price_max) > 0 && Number(free.price_min) > Number(free.price_max)) return '仕入れ値の範囲（下限 > 上限）を見直してください';
   return '';
 }
@@ -434,7 +435,7 @@ function renderListFinal() {
   const srcs = OPTIONS.sources.filter(s => state.sources.has(s.key)).map(s => s.label);
   const rows = [
     ['ブランド', mlTargetLabel()],
-    ['調べる組', e.pairs ? `${e.pairs}組（ブランド×ジャンル、型番・モデル名を入れたブランドは×型番・モデル名）` : ''],
+    ['調べる組', e.pairs ? `${e.pairs}組（ブランド×ジャンル）` : ''],
     ['仕入れ値', `${num(free.price_min)}円〜${Number(free.price_max) > 0 ? num(free.price_max) + '円' : '上限なし'}（送料込み）${mlTargetEntries().some(x => x.price_min || x.price_max) ? '・金額を登録したブランドはその金額' : ''}`],
     ['性別', free.gender],
     ['仕入れ先', srcs.join('・')],
@@ -444,13 +445,14 @@ function renderListFinal() {
   $('mlSummary').innerHTML = rows.map(([k, v]) => `<div class="fs-row"><dt>${k}</dt><dd class="${v ? '' : 'missing'}">${esc(v || '未選択')}</dd></div>`).join('');
   const err = listError();
   $('mlFinalLine').innerHTML = err ? `<span class="warn">⚠ ${esc(err)}</span>`
-    : `検索語 約<b>${e.q}</b>本 × 仕入れ先 <b>${state.sources.size}</b>か所・所要時間の目安 <b>約${mlFmtMin(e.lo)}〜${mlFmtMin(e.hi)}</b>（写真の確認の時間は別）`;
+    : `かかる時間の目安 <b>約${mlFmtMin(e.lo)}〜${mlFmtMin(e.hi)}</b>（検索 ${e.q}本 × 仕入れ先 ${state.sources.size}か所）`;
   const warn = $('mlWarn');
   if (!err && (e.brands > 10 || e.hi > 60)) {
     warn.hidden = false;
-    warn.textContent = `⚠ ${e.brands}ブランド・${e.pairs}組を順番に調べるので、${mlFmtMin(e.lo)}〜${mlFmtMin(e.hi)}ほどかかりそうです。はじめはオンのブランドを減らすか、取得件数を「少なめ」にするのがおすすめです。途中で「中止」しても、そこまでの結果は見られます。`;
+    warn.textContent = `⚠ ${e.brands}ブランド・${e.pairs}組を順番に調べるので、${mlFmtMin(e.lo)}〜${mlFmtMin(e.hi)}ほどかかりそうです。はじめは「リサーチする」のブランドを減らすか、取得件数を「少なめ」にするのがおすすめです。途中で「中止」しても、そこまでの結果は見られます。`;
   } else warn.hidden = true;
   $('mlStartBtn').disabled = !!err || isRunning();
+  renderAdv('mlAdv', free.gender !== '指定なし' ? [free.gender] : []);
 }
 
 function collectListConditions() {
@@ -470,7 +472,7 @@ async function mlStartResearch() {
   await postResearch(collectListConditions(), 'mlErrorLine', 'mlStartBtn');
 }
 function listCondSummary(c) {
-  const parts = [`マイブランド：${c.list_label || 'オンのブランド'}`];
+  const parts = [`マイブランド：${c.list_label || '「リサーチする」のブランド'}`];
   if (c.free_gender && c.free_gender !== '指定なし') parts.push(c.free_gender);
   parts.push(`${num(c.free_price_min)}〜${num(c.free_price_max)}円`);
   if (c.min_profit !== undefined && c.min_profit !== '') parts.push(`利益${num(c.min_profit)}円以上`);
@@ -576,7 +578,7 @@ function handleListClick(e) {
     mlKeepDraft();
     mlApi('POST', '/api/mylist/toggle', { group: '', enabled: on }).then(r => {
       renderList();
-      mlFlash(r.ok ? `${r.changed}件を${on ? 'オン（リサーチする）' : 'オフ（しない）'}にしました` : (r.error || '保存できませんでした'));
+      mlFlash(r.ok ? `${r.changed}件を「${on ? 'リサーチする' : 'しない'}」にしました` : (r.error || '保存できませんでした'));
     });
     return true;
   }

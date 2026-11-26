@@ -88,7 +88,7 @@ function brandKeywordCount(brand) {
 function stepError(step) {
   if (step >= 1 && !state.categories.size) return 'ジャンルを1つ以上選んでください';
   if (step >= 2 && !selectedVisibleBrands().length) return 'ブランドを1つ以上選んでください';
-  if (step >= 4 && !state.sources.size) return '仕入れ先を1つ以上選んでください';
+  if (step >= 4 && !state.sources.size) return '仕入れ先を1つ以上選んでください（「詳しい設定」の中）';
   return '';
 }
 function canReach(step) {
@@ -98,7 +98,8 @@ function canReach(step) {
 
 // ── 画面切り替え ─────────────────────────────────────────
 function showView(name) {
-  ['setup', 'free', 'list', 'progress', 'result'].forEach(v => { $(v + 'View').hidden = v !== name; });
+  ['home', 'setup', 'free', 'list', 'progress', 'result'].forEach(v => { $(v + 'View').hidden = v !== name; });
+  $('navHome').classList.toggle('on', name === 'home');
   $('navSetup').classList.toggle('on', name === 'setup');
   $('navFree').classList.toggle('on', name === 'free');
   $('navList').classList.toggle('on', name === 'list');
@@ -107,6 +108,8 @@ function showView(name) {
   window.scrollTo(0, 0);
 }
 function showSetup() { goStep(currentStep, true); }
+// はじめに（何をしたい？の3択）。前回の結果があれば上に出す
+function showHome() { showView('home'); renderLastBanner(); }
 
 function goStep(n, fromOutside) {
   n = Math.max(1, Math.min(4, n));
@@ -395,20 +398,37 @@ function renderFinal() {
     ['残り時間', (hours && hours[0] ? hours[1] + '以内' : '指定なし') + (cond.auction_only ? '・オークションのみ' : '')],
     ['取得件数', `${preset ? preset[1] : ''} ${cond.per_source}件`],
   ];
-  if (OPTIONS.photo_ocr_available) rows.push(['写真のタグ読み取り', cond.photo_ocr ? 'する（無料・Mac内OCR）' : 'しない']);
-  if (OPTIONS.photo_local_available) rows.push(['写真で傷・汚れ確認', cond.photo_local ? 'する（無料・Mac内AI）' : 'しない']);
-  if (OPTIONS.photo_check_available) rows.push(['写真AI確認（有料）', cond.photo_check ? 'する（Claude API・型番タグ・傷汚れ）' : 'しない（料金なし）']);
+  if (OPTIONS.photo_ocr_available) rows.push(['写真のタグ', cond.photo_ocr ? '型番を読む（無料）' : '読まない']);
+  if (OPTIONS.photo_local_available) rows.push(['傷・汚れ', cond.photo_local ? '写真でチェック（無料）' : 'チェックしない']);
+  if (OPTIONS.photo_check_available) rows.push(['有料のAI確認', cond.photo_check ? 'する' : 'しない（料金なし）']);
   $('finalSummary').innerHTML = rows.map(([k, v]) =>
     `<div class="fs-row"><dt>${k}</dt><dd class="${v ? '' : 'missing'}">${esc(v || '未選択')}</dd></div>`).join('');
   const e = estimateMinutes(Number(cond.per_source));
   const err = stepError(4);
   $('finalLine').innerHTML = err
     ? `<span class="warn">⚠ ${esc(err)}</span>`
-    : `検索キーワード 約<b>${e.n}</b>件${e.q > e.n ? `（検索語 ${e.q} 本）` : ''} × 仕入れ先 <b>${state.sources.size}</b>か所・所要時間の目安 <b>${etaText(Number(cond.per_source))}</b>`;
+    : `かかる時間の目安 <b>${etaText(Number(cond.per_source))}</b>（キーワード ${e.n}件 × 仕入れ先 ${state.sources.size}か所）`;
   $('startBtn').disabled = !!err || isRunning();
+  renderAdv('setupAdv', [cond.auction_hours ? `残り${(HOUR_OPTIONS.find(([v]) => v === String(cond.auction_hours)) || [, ''])[1]}以内` : ''].filter(Boolean));
   $('etaLine').innerHTML = PER_SOURCE_PRESETS.map(([v, l]) =>
     `<span class="${Number(cond.per_source) === v ? 'on' : ''}">${l}: ${etaText(v) || '—'}</span>`).join('') +
-    '<div class="hint">多いほど見つかりやすくなりますが、時間がかかります（選択中の条件での目安）</div>';
+    '<div class="hint">多いほど見つかりやすくなりますが、時間がかかります</div>';
+}
+
+// 「詳しい設定 ▼」の横に出す、いまの設定の要約（たたんだままでも分かるように）。仕入れ先が0なら開く
+function advSummary(extra) {
+  const preset = PER_SOURCE_PRESETS.find(([v]) => v === Number(cond.per_source));
+  const n = state.sources.size, all = OPTIONS.sources.length;
+  const parts = [n === all ? `仕入れ先 すべて（${n}か所）` : `仕入れ先 ${n}か所`, `取得件数 ${preset ? preset[1] : cond.per_source + '件'}`];
+  if (Number(cond.min_roi) > 0) parts.push(`利益率 ${cond.min_roi}%以上`);
+  return parts.concat(extra || []).join('・');
+}
+function renderAdv(id, extra) {
+  const d = $(id);
+  if (!d) return;
+  const sub = $(id + 'Sub');
+  if (sub) sub.textContent = state.sources.size ? advSummary(extra) : '⚠ 仕入れ先が選ばれていません';
+  if (!state.sources.size) d.open = true;
 }
 
 // ── 操作（クリック・入力） ───────────────────────────────
@@ -619,12 +639,16 @@ async function postResearch(c, errId, btnId) {
   }
 }
 
-async function stopResearch() {
-  if (!confirm('リサーチを中止しますか？（ここまでに見つかった分は結果に表示されます）')) return;
+// 中止は画面の中で確認する（confirm は使わない）
+async function stopResearch(confirmed) {
+  if (!confirmed) { $('stopConfirm').hidden = false; return; }
+  $('stopConfirm').hidden = true;
   $('stopBtn').disabled = true;
   $('stopBtn').textContent = '中止しています…';
   try { await fetch('/api/stop', { method: 'POST' }); } catch (e) { /* 次のポーリングで反映 */ }
 }
+
+function cancelStop() { $('stopConfirm').hidden = true; }
 
 function startPolling() {
   clearInterval(pollTimer);
@@ -768,6 +792,10 @@ function updateNav() {
 }
 
 function renderLastBanner() {
+  renderLastBannerMain();
+  ['lastBannerHome', 'lastBannerFree'].forEach(id => { const x = $(id); if (x) { x.hidden = $('lastBanner').hidden; x.innerHTML = $('lastBanner').innerHTML; } });
+}
+function renderLastBannerMain() {
   const b = $('lastBanner');
   if (isRunning()) {
     b.hidden = false;
@@ -797,6 +825,7 @@ function showProgress(s) {
   const running = s.state === 'running';
   if (running) lastRunning = s;
   $('stopBtn').hidden = !running;
+  if (!running) $('stopConfirm').hidden = true;
   if (running && $('stopBtn').textContent !== '中止しています…') { $('stopBtn').disabled = false; }
   if (running && s.stop_requested) { $('stopBtn').disabled = true; }
   $('progressActions').hidden = running;
@@ -938,7 +967,7 @@ function renderResults() {
   $('confFilterRow').hidden = !Object.keys(confCounts).length;
   if (filterConf && !confCounts[filterConf]) filterConf = '';
   $('confFilter').innerHTML = chip('data-fconf', '', 'すべて', all.length, filterConf) +
-    ['高', '中', '低'].filter(k => confCounts[k]).map(k => chip('data-fconf', k, `信頼度 ${k}`, confCounts[k], filterConf)).join('');
+    ['高', '中', '低'].filter(k => confCounts[k]).map(k => chip('data-fconf', k, `確かさ ${k}`, confCounts[k], filterConf)).join('');
   $('sourceFilter').innerHTML = chip('data-fsource', '', 'すべて', all.length, filterSource) +
     Object.keys(srcCounts).map(k => chip('data-fsource', k, `${SOURCE_ICONS[k] || ''} ${SOURCE_LABELS[k] || k}`, srcCounts[k], filterSource)).join('');
   $('genreFilter').innerHTML = chip('data-fgenre', '', 'すべて', all.length, filterGenre) +
@@ -974,7 +1003,7 @@ function renderResults() {
       <div class="empty-icon">🔎</div>
       <div class="empty-title">条件に合う商品は見つかりませんでした</div>
       <div class="empty-text">最低利益額を下げる・仕入れ先を増やす・取得件数を増やすと見つかりやすくなります。</div>
-      <button type="button" class="primary-btn" onclick="goStep(4, true)">条件を変えて再検索</button></div>`;
+      <button type="button" class="primary-btn" onclick="backToConditions()">条件を変えて再検索</button></div>`;
     return;
   }
   if (!items.length) {
@@ -1135,7 +1164,9 @@ function renderFree() {
   $('freeBrandPicked').innerHTML = free.brands.length
     ? free.brands.map(b => `<button type="button" class="chip on" data-free-brand-del="${esc(b)}">✓ ${esc(b)} ✕</button>`).join('')
     : '<span class="hint">ブランドを入力するか、下の候補から選んでください</span>';
-  $('freeBrandSuggest').innerHTML = fo.brands.filter(b => b.count > 0).slice(0, 24).map(b => {
+  const suggest = fo.brands.filter(b => b.count > 0);
+  $('freeSuggestLabel').hidden = !suggest.length;
+  $('freeBrandSuggest').innerHTML = suggest.slice(0, 24).map(b => {
     const on = free.brands.includes(b.name);
     return `<button type="button" class="chip ${on ? 'on' : ''}" data-free-brand="${esc(b.name)}">${on ? '✓ ' : ''}${esc(b.name)}</button>`;
   }).join('');
@@ -1145,10 +1176,11 @@ function renderFree() {
   $('freeGenreChips').innerHTML = fo.genres.map(g => {
     const on = free.genres.has(g.key);
     const bn = brandGenres[g.key];
-    return `<button type="button" class="chip ${on ? 'on' : ''}" data-free-genre="${esc(g.key)}" title="${g.hint ? esc(`メルカリの「${g.hint}」`) : ''}">${on ? '✓ ' : ''}${g.icon || ''} ${esc(g.label)} <span class="chip-n">${bn ? `このブランド${bn}件・` : ''}全体${g.count}件</span></button>`;
+    const cnt = fo.seed_count ? ` <span class="chip-n">${bn ? `このブランド${bn}件・` : ''}全体${g.count}件</span>` : '';
+    return `<button type="button" class="chip ${on ? 'on' : ''}" data-free-genre="${esc(g.key)}" title="${g.hint ? esc(`メルカリの「${g.hint}」`) : ''}">${on ? '✓ ' : ''}${g.icon || ''} ${esc(g.label)}${cnt}</button>`;
   }).join('');
-  $('freeGenreHint').textContent = 'ジャンルの分け方はメルカリのカテゴリと同じです（チップにマウスを置くと中身が出ます）' +
-    (fo.seed_count ? `。件数は利益商品共有（${fo.seed_count}件）で利益が出た商品の数です` : '');
+  $('freeGenreHint').textContent = 'メルカリのカテゴリと同じ分け方です（マウスを置くと中身が出ます）' +
+    (fo.seed_count ? '。数字は、仲間が利益を出した商品の数です' : '');
   if (document.activeElement !== $('freeCustomGenre')) $('freeCustomGenre').value = free.custom;
   if (document.activeElement !== $('freePriceMin')) $('freePriceMin').value = free.price_min;
   if (document.activeElement !== $('freePriceMax')) $('freePriceMax').value = free.price_max;
@@ -1188,7 +1220,7 @@ function freeGenreLabels(keys, custom) {
 function freeError() {
   if (!free.brands.length) return 'ブランドを1つ以上入力してください';
   if (!freeGenreLabels([...free.genres], free.custom).length) return 'ジャンルを1つ以上選ぶか、自由入力してください';
-  if (!state.sources.size) return '仕入れ先を1つ以上選んでください';
+  if (!state.sources.size) return '仕入れ先を1つ以上選んでください（「詳しい設定」の中）';
   if (Number(free.price_max) > 0 && Number(free.price_min) > Number(free.price_max)) return '仕入れ値の範囲（下限 > 上限）を見直してください';
   return '';
 }
@@ -1223,8 +1255,9 @@ function renderFreeFinal() {
   const e = freeEstimate();
   const f = m => (m >= 60 ? `${Math.floor(m / 60)}時間${m % 60 ? (m % 60) + '分' : ''}` : `${m}分`);
   $('freeFinalLine').innerHTML = err ? `<span class="warn">⚠ ${esc(err)}</span>`
-    : `検索語 約<b>${e.q}</b>本 × 仕入れ先 <b>${state.sources.size}</b>か所・所要時間の目安 <b>約${f(e.lo)}〜${f(e.hi)}</b>（写真の確認の時間は別）`;
+    : `かかる時間の目安 <b>約${f(e.lo)}〜${f(e.hi)}</b>（検索 ${e.q}本 × 仕入れ先 ${state.sources.size}か所）`;
   $('freeStartBtn').disabled = !!err || isRunning();
+  renderAdv('freeAdv', free.gender !== '指定なし' ? [free.gender] : []);
 }
 
 function collectFreeConditions() {
@@ -1241,7 +1274,7 @@ async function startFreeResearch() {
   await postResearch(collectFreeConditions(), 'freeErrorLine', 'freeStartBtn');
 }
 function freeCondSummary(c) {
-  const parts = [`フリーリサーチ：${(c.free_brands || []).join('・')}`, freeGenreLabels(c.free_genres, c.free_custom_genre).join('・')];
+  const parts = [`自由に探す：${(c.free_brands || []).join('・')}`, freeGenreLabels(c.free_genres, c.free_custom_genre).join('・')];
   if (c.free_gender && c.free_gender !== '指定なし') parts.push(c.free_gender);
   parts.push(`${num(c.free_price_min)}〜${num(c.free_price_max)}円`);
   if (c.min_profit !== undefined && c.min_profit !== '') parts.push(`利益${num(c.min_profit)}円以上`);
@@ -1293,7 +1326,7 @@ function freeBadges(d) {
   const f = d.free_info;
   if (!f) return '';
   const g = f.gender === '不明' ? '性別不明' : f.gender;
-  return `<span class="badge conf conf-${esc(f.confidence)}">相場の信頼度 ${esc(f.confidence)}</span><span class="badge b-gender">${esc(g)}</span>`;
+  return `<span class="badge conf conf-${esc(f.confidence)}" title="メルカリで売れた数が多く、値段のばらつきが小さいほど「高」">相場の確かさ ${esc(f.confidence)}</span><span class="badge b-gender">${esc(g)}</span>`;
 }
 // フリーリサーチ: 相場の根拠・下振れ時の利益・注目ポイント
 function freeInfoHtml(d) {
@@ -1334,21 +1367,19 @@ function freeInfoHtml(d) {
 // 写真から型番を読む機能の有効/無効（ヘッダーに小さく）と、スキャン中・後の読み取り件数・概算料金（調査中の画面）
 function renderPhotoRead(p, o, l) {
   if (!p && !o && !l) return;
-  $('photoStatus').hidden = false;
-  $('photoStatus').textContent = [o && o.label, p && p.label].filter(Boolean).join(' / ');
   const lines = [];
   const ost = (o && o.stats) || {};
   if (o && o.available && ost.targets) {
-    lines.push(`🔎 写真のタグ読み取り（無料）：型番 採用 ${num(ost.adopted)}件 / 対象 ${num(ost.targets)}件（キャッシュ ${num(ost.cached)}件）・写真 ${num(ost.images)}枚`);
+    lines.push(`🔎 写真のタグから型番を読む（無料）：${num(ost.targets)}件中 ${num(ost.adopted)}件で型番が分かりました`);
   }
   const st = (p && p.stats) || {};
-  if (p && p.enabled && (st.targets || st.inspect_targets || st.api_calls)) {
-    lines.push(`📷 写真AI確認（有料）：型番 採用 ${num(st.adopted)}件 / 対象 ${num(st.targets)}件・傷汚れ 判定 ${num(st.inspected)}件（状態を下げて残した ${num(st.downgraded)}件・利益不足で除外 ${num(st.dropped)}件）・API ${num(st.api_calls)}回・概算 ${num(Math.round(st.cost_yen || 0))}円`
+  if (p && p.enabled && p.available && (st.targets || st.inspect_targets || st.api_calls)) {
+    lines.push(`📷 写真をAIでくわしく確認（有料）：型番 採用 ${num(st.adopted)}件 / 対象 ${num(st.targets)}件・傷汚れ 判定 ${num(st.inspected)}件（状態を下げて残した ${num(st.downgraded)}件・利益不足で除外 ${num(st.dropped)}件）・API ${num(st.api_calls)}回・概算 ${num(Math.round(st.cost_yen || 0))}円`
       + (st.stopped ? '（料金上限で停止）' : ''));
   }
   const lst = (l && l.stats) || {};
   if (l && lst.inspect_targets) {
-    lines.push(`🖥 写真で傷・汚れ確認（無料・Mac内AI）：判定 ${num(lst.inspected)}件 / 対象 ${num(lst.inspect_targets)}件（キャッシュ ${num(lst.inspect_cached)}件・状態を下げて残した ${num(lst.downgraded)}件・利益不足で除外 ${num(lst.dropped)}件）・写真 ${num(lst.photos)}枚`);
+    lines.push(`🖥 写真で傷・汚れをチェック（無料）：${num(lst.inspect_targets)}件中 ${num(lst.inspected)}件を確認（状態を下げた ${num(lst.downgraded)}件・利益が足りず外した ${num(lst.dropped)}件）`);
   }
   $('photoStats').hidden = !lines.length;
   if (lines.length) $('photoStats').textContent = lines.join('　');
@@ -1362,8 +1393,10 @@ async function init() {
     return;
   }
   try { restoreState(); } catch (e) { console.warn('前回の選択を復元できませんでした', e); }
-  // 最初に開くステップ: 必須が揃っているところまで（前回の選択が揃っていればステップ4は開かず1から）
-  goStep(1);
+  // 最初は「はじめに（何をしたい？の3択）」。型番で探す画面はステップ1から
+  currentStep = 1;
+  showHome();
+  if (!guideHidden()) openGuide(false);
   let s = null;
   try { s = await (await fetch('/api/status?results=1')).json(); } catch (e) { s = null; }
   if (!s) return;
@@ -1382,4 +1415,27 @@ async function init() {
   }
   updateNav();
 }
+// ── 使い方の案内（毎回起動時に表示。「今後は表示しない」で出さない。ヘッダーの「使い方」でいつでも） ─────
+const GUIDE_HIDE_KEY = 'rieki-guide-hide-v1';
+function guideHidden() {
+  try { return localStorage.getItem(GUIDE_HIDE_KEY) === '1'; } catch (e) { return false; }
+}
+let guideLastFocus = null;
+function openGuide() {
+  guideLastFocus = document.activeElement;
+  $('guideHide').checked = guideHidden();
+  $('guide').hidden = false;
+  $('guideClose').focus();
+}
+function closeGuide() {
+  try {
+    if ($('guideHide').checked) localStorage.setItem(GUIDE_HIDE_KEY, '1');
+    else localStorage.removeItem(GUIDE_HIDE_KEY);
+  } catch (e) { /* 保存できなくても閉じる */ }
+  $('guide').hidden = true;
+  if (guideLastFocus && guideLastFocus.focus) guideLastFocus.focus();
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('guide').hidden) { e.preventDefault(); closeGuide(); } });
+$('guide').addEventListener('click', e => { if (e.target === $('guide')) closeGuide(); });
+
 init();

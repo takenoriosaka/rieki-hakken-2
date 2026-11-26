@@ -16,25 +16,56 @@
     <div class="brand-mark" aria-hidden="true">¥</div>
     <div class="header-text">
       <h1>利益発見ツール2</h1>
-      <p>この画面の結果はこのMacの中だけに表示されます（公開ダッシュボードには反映されません）</p>
-      <p class="photo-status" id="photoStatus" hidden></p>
+      <p>メルカリより安く仕入れられる商品を探します</p>
     </div>
     <nav class="header-nav">
-      <button type="button" class="nav-btn" id="navSetup" onclick="showSetup()">条件を選ぶ</button>
-      <button type="button" class="nav-btn" id="navFree" onclick="showFree()">フリーリサーチ</button>
-      <button type="button" class="nav-btn" id="navList" onclick="showList()">マイブランド登録</button>
+      <button type="button" class="nav-btn" id="navHome" onclick="showHome()">🏠 はじめに</button>
+      <button type="button" class="nav-btn" id="navList" onclick="showList()">マイブランド</button>
+      <button type="button" class="nav-btn" id="navFree" onclick="showFree()">自由に探す</button>
+      <button type="button" class="nav-btn" id="navSetup" onclick="showSetup()">型番で探す</button>
       <button type="button" class="nav-btn" id="navResults" onclick="showResultsView()" hidden>結果を見る</button>
       <button type="button" class="nav-btn nav-running" id="navProgress" onclick="showView('progress')" hidden>調査中…</button>
+      <button type="button" class="nav-btn nav-help" id="navHelp" onclick="openGuide(true)">❔ 使い方</button>
     </nav>
   </div>
 </header>
 
 <main class="wrap">
+  <!-- ───────── はじめに（何をしたい？の3択） ───────── -->
+  <section id="homeView" class="view" hidden>
+    <div class="home-head">
+      <h2>何をしたいですか？</h2>
+      <p>えらぶと、その画面に進みます。上のボタンからいつでもここに戻れます。</p>
+    </div>
+    <div class="last-banner" id="lastBannerHome" hidden></div>
+    <div class="home-cards">
+      <button type="button" class="home-card home-main" onclick="showList()">
+        <span class="home-badge">おすすめ</span>
+        <span class="home-icon" aria-hidden="true">⭐</span>
+        <span class="home-title">登録したブランドで探す</span>
+        <span class="home-desc">よく仕入れるブランドを登録しておき、まとめて探します</span>
+        <span class="home-go">はじめる →</span>
+      </button>
+      <button type="button" class="home-card" onclick="showFree()">
+        <span class="home-icon" aria-hidden="true">🔍</span>
+        <span class="home-title">ブランドとジャンルを自由に入れて探す</span>
+        <span class="home-desc">その場でブランドとジャンル（ジャケット・バッグなど）を入れて探します</span>
+        <span class="home-go">はじめる →</span>
+      </button>
+      <button type="button" class="home-card" onclick="showSetup()">
+        <span class="home-icon" aria-hidden="true">🔢</span>
+        <span class="home-title">型番で細かく探す <small>慣れた人向け</small></span>
+        <span class="home-desc">ツールに入っているモデル・型番から、ジャンル → ブランド → 型番の順に選びます</span>
+        <span class="home-go">はじめる →</span>
+      </button>
+    </div>
+  </section>
+
   <!-- ───────── 条件選択（ステップ式） ───────── -->
   <section id="setupView" class="view">
     <div class="mode-bar">
-      <span class="mode-now">通常モード：登録済みのモデル・型番で照合します</span>
-      <button type="button" class="link-btn" onclick="showFree()">型番にこだわらず自由に探す（フリーリサーチ）→</button>
+      <span class="mode-now">型番で細かく探す（慣れた人向け）：ツールに入っているモデル・型番で探します</span>
+      <button type="button" class="link-btn" onclick="showHome()">← ほかの探し方にする</button>
     </div>
     <button type="button" class="ml-linkbox" data-ml-link hidden onclick="showList()"></button>
     <ol class="stepper" id="stepper">
@@ -44,7 +75,7 @@
       <li class="stp-line" aria-hidden="true"></li>
       <li class="stp" data-step="3"><button type="button" onclick="goStep(3)"><span class="dot">3</span><span class="stp-label">モデル・型番</span></button></li>
       <li class="stp-line" aria-hidden="true"></li>
-      <li class="stp" data-step="4"><button type="button" onclick="goStep(4)"><span class="dot">4</span><span class="stp-label">条件・仕入れ先</span></button></li>
+      <li class="stp" data-step="4"><button type="button" onclick="goStep(4)"><span class="dot">4</span><span class="stp-label">利益の条件</span></button></li>
     </ol>
     <div class="step-count" id="stepCount">ステップ 1 / 4</div>
 
@@ -101,8 +132,8 @@
     <!-- ステップ4 -->
     <section class="step" data-step="4" hidden>
       <div class="step-head">
-        <h2>利益の条件と仕入れ先を決めましょう</h2>
-        <p>迷ったら、そのままで大丈夫です。仕入れ先だけは1つ以上選んでください。</p>
+        <h2>利益の条件を決めましょう</h2>
+        <p>迷ったら、そのままで大丈夫です。</p>
       </div>
 
       <div class="cond-grid">
@@ -112,40 +143,45 @@
             <input type="range" id="minProfitRange" min="0" max="30000" step="500" aria-label="最低利益額">
             <div class="num-box"><input type="number" id="minProfit" min="0" step="500" inputmode="numeric"><span>円</span></div>
           </div>
-          <div class="hint">この金額以上の利益が見込める商品だけを表示します</div>
+          <div class="hint">この金額以上もうかりそうな商品だけ出します</div>
         </div>
+      </div>
+
+      <details class="adv" id="setupAdv">
+        <summary><span class="adv-title">⚙️ 詳しい設定</span><span class="adv-sub" id="setupAdvSub"></span></summary>
+      <div class="cond-grid">
         <div class="cond-card">
           <h3>最低利益率</h3>
           <div class="slider-row">
             <input type="range" id="minRoiRange" min="0" max="200" step="5" aria-label="最低利益率">
             <div class="num-box"><input type="number" id="minRoi" min="0" step="5" inputmode="numeric"><span>%</span></div>
           </div>
-          <div class="hint">0% にすると利益率では絞り込みません</div>
+          <div class="hint">0% なら利益率では絞りません</div>
         </div>
         <div class="cond-card">
           <h3>オークション残り時間 <small>ヤフオクの入札形式のみ</small></h3>
           <div class="seg" id="hoursSeg"></div>
           <label class="switch-line"><input type="checkbox" id="auctionOnly"> <span>オークション形式の商品だけにする</span></label>
-          <div class="hint">即決・定額・フリマ形式の商品は残り時間の条件の対象外です（上のチェックを入れると除外）</div>
+          <div class="hint">即決・フリマの商品には関係ありません</div>
         </div>
         <div class="cond-card" id="photoOcrCard" hidden>
-          <h3>写真のタグ読み取り <small>無料・Mac内OCR</small></h3>
-          <label class="switch-line"><input type="checkbox" id="photoOcr"> <span>写真のタグ読み取り（無料・Mac内OCR）</span></label>
-          <div class="hint">タイトルにも説明文にも型番が無い出品は、出品写真の文字（品質表示タグ等）を Mac の中で読み取って型番を探します。料金はかかりません（読み取り済みの写真は再度読みません）</div>
+          <h3>写真のタグから型番を読む <small>無料</small></h3>
+          <label class="switch-line"><input type="checkbox" id="photoOcr"> <span>写真のタグから型番を読む（無料）</span></label>
+          <div class="hint">タイトルに型番が無いとき、写真のタグの文字を読みます</div>
         </div>
         <div class="cond-card" id="photoLocalCard" hidden>
-          <h3>写真で傷・汚れ確認 <small>無料・Mac内AI</small></h3>
-          <label class="switch-line"><input type="checkbox" id="photoLocal"> <span>写真で傷・汚れ確認（無料・Mac内AI）</span></label>
-          <div class="hint" id="photoLocalHint">利益が出る商品の写真を Mac の中の AI（Ollama）で1枚ずつ見て傷・汚れを判定し、タイトルの状態より悪ければ相場を下げて計算します。料金はかかりません（1件あたり数十秒かかります。判定済みの写真は再度見ません）。有料の Claude より見落とし・誤判定が多いので参考程度に</div>
+          <h3>写真で傷・汚れをチェック <small>無料・時間がかかる</small></h3>
+          <label class="switch-line"><input type="checkbox" id="photoLocal"> <span>写真で傷・汚れをチェック（無料・時間がかかる）</span></label>
+          <div class="hint" id="photoLocalHint">もうかりそうな商品の写真を見て、傷・汚れがあれば相場を下げて計算します（1件数十秒。参考程度に）</div>
           <div class="hint warn" id="photoLocalReason" hidden></div>
         </div>
         <div class="cond-card" id="photoCheckCard" hidden>
-          <h3>写真AI確認 <small>有料・Claude API</small></h3>
-          <label class="switch-line"><input type="checkbox" id="photoCheck"> <span>写真AI確認（有料・Claude API）</span></label>
-          <div class="hint">料金がかかります（1件あたり約6〜10円・1回のリサーチの上限 1,000円）。チェックを入れたときだけ、無料の読み取りでも型番が無い出品のタグをAIで読み、利益が出る商品は写真で傷・汚れを確認して、タイトルの状態より悪ければ相場を下げて計算します。毎回オフから始まります</div>
+          <h3>写真をAIでくわしく確認 <small>有料</small></h3>
+          <label class="switch-line"><input type="checkbox" id="photoCheck"> <span>写真をAIでくわしく確認（有料）</span></label>
+          <div class="hint">1件約6〜10円（1回の上限1,000円）。毎回オフから始まります</div>
         </div>
         <div class="cond-card">
-          <h3>取得件数 <small>仕入れ先ごと・1キーワードあたり</small></h3>
+          <h3>取得件数 <small>仕入れ先ごと</small></h3>
           <div class="seg seg-presets" id="perSourceSeg"></div>
           <div class="eta" id="etaLine"></div>
         </div>
@@ -159,7 +195,8 @@
         </span>
       </div>
       <div class="source-grid" id="sourceGrid"></div>
-      <label class="switch-line" id="shoppingNewLine"><input type="checkbox" id="shoppingNew" data-shopping-new> <span>Yahoo!ショッピングは新品も含める（既定は中古のみ・送料込みで計算。PayPayポイントは数えません）</span></label>
+      <label class="switch-line" id="shoppingNewLine"><input type="checkbox" id="shoppingNew" data-shopping-new> <span>Yahoo!ショッピングは新品も含める（ふだんは中古だけ）</span></label>
+      </details>
 
       <div class="final-box">
         <h3>この内容でリサーチします</h3>
@@ -180,15 +217,15 @@
   <!-- ───────── フリーリサーチ ───────── -->
   <section id="freeView" class="view" hidden>
     <div class="mode-bar">
-      <span class="mode-now">フリーリサーチ：ブランドとアイテムの種類で自由に探します（型番照合より相場が大まか）</span>
-      <button type="button" class="link-btn" onclick="showSetup()">← 通常モード（登録モデル・型番）に戻る</button>
+      <span class="mode-now">自由に探す：ブランドとジャンルを入れて探します</span>
+      <button type="button" class="link-btn" onclick="showHome()">← ほかの探し方にする</button>
     </div>
     <button type="button" class="ml-linkbox" data-ml-link hidden onclick="showList()"></button>
     <div class="last-banner" id="lastBannerFree" hidden></div>
     <section class="step">
       <div class="step-head">
-        <h2>フリーリサーチ</h2>
-        <p>登録済みのモデル・型番に限らず、<strong>ブランド × アイテムの種類 × 価格帯</strong>で探します。相場はメルカリの売り切れ（同じブランド・同じ種類）から出すので、型番で照合するより大まかです。結果には<strong>相場の根拠と信頼度</strong>を表示します。</p>
+        <h2>ブランドとジャンルを入れて探す</h2>
+        <p>相場はメルカリで売れた値段から出します。</p>
       </div>
 
       <div class="free-block">
@@ -199,7 +236,7 @@
         </div>
         <datalist id="freeBrandList"></datalist>
         <div class="chips free-picked" id="freeBrandPicked"></div>
-        <div class="mg-label">利益商品共有で多いブランド</div>
+        <div class="mg-label" id="freeSuggestLabel">よく利益が出ているブランド</div>
         <div class="chips" id="freeBrandSuggest"></div>
       </div>
 
@@ -207,7 +244,7 @@
         <div class="field-label">ジャンル（アイテムの種類） <small>複数可</small></div>
         <div class="chips" id="freeGenreChips"></div>
         <div class="hint" id="freeGenreHint"></div>
-        <label for="freeCustomGenre" class="field-label free-sub">その他の種類を自由入力 <small>任意・「、」区切り</small></label>
+        <label for="freeCustomGenre" class="field-label free-sub">ほかのジャンルを入力 <small>空欄でOK</small></label>
         <input type="text" id="freeCustomGenre" class="text-in" placeholder="例: ベスト、ポロシャツ" autocomplete="off">
       </div>
 
@@ -221,28 +258,32 @@
           </div>
         </div>
         <div class="cond-card">
-          <h3>メンズ / レディース</h3>
-          <div class="seg" id="freeGenderSeg"></div>
-          <div class="hint">タイトル・説明文の「メンズ」「レディース」、号サイズ、紳士服のサイズ表記（A5等）、タトラスの品番（MTA/LTA）で判定します。判定できない出品は除かずに「性別不明」と表示します</div>
-        </div>
-        <div class="cond-card">
           <h3>最低利益額</h3>
           <div class="num-box"><input type="number" id="freeMinProfit" min="0" step="500" inputmode="numeric"><span>円</span></div>
+        </div>
+      </div>
+
+      <details class="adv" id="freeAdv">
+        <summary><span class="adv-title">⚙️ 詳しい設定</span><span class="adv-sub" id="freeAdvSub"></span></summary>
+      <div class="cond-grid">
+        <div class="cond-card">
+          <h3>メンズ / レディース</h3>
+          <div class="seg" id="freeGenderSeg"></div>
+          <div class="hint">分からない商品は「性別不明」として残します</div>
         </div>
         <div class="cond-card">
           <h3>最低利益率</h3>
           <div class="num-box"><input type="number" id="freeMinRoi" min="0" step="5" inputmode="numeric"><span>%</span></div>
         </div>
         <div class="cond-card">
-          <h3>取得件数 <small>仕入れ先ごと・1検索語あたり</small></h3>
+          <h3>取得件数 <small>仕入れ先ごと</small></h3>
           <div class="seg seg-presets" id="freePerSourceSeg"></div>
         </div>
         <div class="cond-card">
           <h3>写真の確認</h3>
-          <label class="switch-line" id="freePhotoOcrLine"><input type="checkbox" id="freePhotoOcr"> <span>写真のタグ読み取り（無料・Mac内OCR）</span></label>
-          <label class="switch-line" id="freePhotoLocalLine"><input type="checkbox" id="freePhotoLocal"> <span>写真で傷・汚れ確認（無料・Mac内AI）</span></label>
-          <label class="switch-line" id="freePhotoCheckLine"><input type="checkbox" id="freePhotoCheck"> <span>写真AI確認（有料・Claude API）</span></label>
-          <div class="hint">タグの型番が読めた出品は、その型番の相場に切り替えます（タトラス・モンクレール等の登録済みブランドのダウン・バッグ）</div>
+          <label class="switch-line" id="freePhotoOcrLine"><input type="checkbox" id="freePhotoOcr"> <span>写真のタグから型番を読む（無料）</span></label>
+          <label class="switch-line" id="freePhotoLocalLine"><input type="checkbox" id="freePhotoLocal"> <span>写真で傷・汚れをチェック（無料・時間がかかる）</span></label>
+          <label class="switch-line" id="freePhotoCheckLine"><input type="checkbox" id="freePhotoCheck"> <span>写真をAIでくわしく確認（有料・毎回オフから）</span></label>
         </div>
       </div>
 
@@ -254,13 +295,14 @@
         </span>
       </div>
       <div class="source-grid" id="freeSourceGrid"></div>
-      <label class="switch-line"><input type="checkbox" id="freeShoppingNew" data-shopping-new> <span>Yahoo!ショッピングは新品も含める（既定は中古のみ）</span></label>
+      <label class="switch-line"><input type="checkbox" id="freeShoppingNew" data-shopping-new> <span>Yahoo!ショッピングは新品も含める（ふだんは中古だけ）</span></label>
+      </details>
 
       <div class="final-box">
-        <h3>この内容でフリーリサーチします</h3>
+        <h3>この内容で探します</h3>
         <dl class="final-summary" id="freeSummary"></dl>
         <div class="final-line" id="freeFinalLine"></div>
-        <button type="button" class="start-btn" id="freeStartBtn" onclick="startFreeResearch()">🔍 フリーリサーチ開始</button>
+        <button type="button" class="start-btn" id="freeStartBtn" onclick="startFreeResearch()">🔍 リサーチ開始</button>
         <div class="error-line" id="freeErrorLine" role="alert"></div>
       </div>
     </section>
@@ -269,8 +311,8 @@
   <!-- ───────── マイブランド登録（旧名: 仕入れリスト。my_list.json。my_list.js） ───────── -->
   <section id="listView" class="view" hidden>
     <div class="mode-bar">
-      <span class="mode-now">マイブランド登録：ブランド・ジャンル・型番・モデル名・金額などを登録して、まとめてリサーチできます</span>
-      <button type="button" class="link-btn" onclick="mlScrollResearch()">マイブランドでリサーチ ↓</button>
+      <span class="mode-now">登録したブランドで探す：よく仕入れるブランドを登録して、まとめて探します</span>
+      <button type="button" class="link-btn" onclick="mlScrollResearch()">リサーチへ進む ↓</button>
     </div>
     <div class="last-banner" id="lastBannerList" hidden></div>
 
@@ -280,14 +322,14 @@
         <span class="ml-intro-act" id="mlIntroAct">たたむ ▲</span>
       </button>
       <div class="ml-intro-body" id="mlIntroBody">
-        <p class="ml-intro-note">ブランド（必要なら型番・モデル名・金額なども）を登録 → オンにしたブランドを下の「マイブランドでリサーチ」でまとめて調べます。</p>
+        <p class="ml-intro-note">① ブランドを登録 → ② 下の「リサーチ開始」で、「リサーチする」にしたブランドをまとめて調べます。</p>
       </div>
     </div>
 
     <section class="step">
       <div class="step-head">
-        <h2>マイブランド登録</h2>
-        <p>ブランドだけ入れれば登録できます。型番・モデル名・金額・検索数は必要なときだけ入れてください。</p>
+        <h2>① ブランドを登録</h2>
+        <p>ブランドだけ入れれば登録できます。</p>
       </div>
 
       <div class="ml-quick" id="mlQuick">
@@ -298,6 +340,10 @@
             <datalist id="mlQuickList"></datalist>
           </div>
         </div>
+        <div class="field-label ml-sub">ジャンル <small>いくつでも・選ばなければおまかせ</small></div>
+        <div class="chips" id="mlQuickGenres"></div>
+        <details class="adv adv-small" id="mlQuickAdv">
+          <summary><span class="adv-title">⚙️ 詳しく登録（型番・モデル名・金額・検索数）</span></summary>
         <div class="ml-quick-row ml-row2">
           <div class="ml-quick-term">
             <label for="mlQuickNumbers" class="field-label">型番 <small>空欄OK・複数は「、」かスペースで区切る</small></label>
@@ -321,10 +367,9 @@
             <label for="mlQuickPer" class="field-label">検索数 <small>仕入れ先1か所あたり</small></label>
             <select id="mlQuickPer" class="text-in"></select>
           </div>
-          <button type="button" class="primary-btn ml-quick-add" id="mlQuickAddBtn" onclick="mlQuickAdd()">＋ 追加</button>
         </div>
-        <div class="field-label ml-sub">ジャンル <small>いくつでも・選ばなければおまかせ</small></div>
-        <div class="chips" id="mlQuickGenres"></div>
+        </details>
+        <div class="ml-quick-btnrow"><button type="button" class="primary-btn ml-quick-add" id="mlQuickAddBtn" onclick="mlQuickAdd()">＋ 登録する</button></div>
         <div class="ml-quick-msg" id="mlQuickMsg" role="status" aria-live="polite"></div>
       </div>
 
@@ -337,8 +382,8 @@
         <div class="seg" id="mlFilterSeg"></div>
       </div>
       <div class="toolbar">
-        <button type="button" class="ghost-btn" data-ml-all="on">すべてオン</button>
-        <button type="button" class="ghost-btn" data-ml-all="off">すべてオフ</button>
+        <button type="button" class="ghost-btn" data-ml-all="on">すべて「リサーチする」</button>
+        <button type="button" class="ghost-btn" data-ml-all="off">すべて「しない」</button>
       </div>
       <div class="ml-list" id="mlGroups"></div>
       <div class="hint ml-flash" id="mlFlash" role="status"></div>
@@ -346,8 +391,8 @@
 
     <section class="step" id="mlResearch">
       <div class="step-head">
-        <h2>マイブランドでリサーチ</h2>
-        <p>オンのブランドを <strong>ブランド × ジャンル</strong> ごとに順番に調べます（フリーリサーチと同じ調べ方。相場はメルカリの売り切れから出します）。途中で「中止」もできます。</p>
+        <h2>② リサーチ開始</h2>
+        <p>「リサーチする」にしたブランドを順番に調べます。途中で中止もできます。</p>
       </div>
       <div class="free-block">
         <label for="mlTarget" class="field-label">調べるブランド</label>
@@ -363,30 +408,35 @@
             <span class="range-sep">〜</span>
             <div class="num-box"><input type="number" id="mlPriceMax" min="0" step="500" inputmode="numeric"><span>円</span></div>
           </div>
-          <div class="hint">ブランドに下限・上限金額を登録してあれば、そのブランドはそちらを使います</div>
-        </div>
-        <div class="cond-card">
-          <h3>メンズ / レディース</h3>
-          <div class="seg" id="mlGenderSeg"></div>
+          <div class="hint">金額を登録したブランドは、そちらを使います</div>
         </div>
         <div class="cond-card">
           <h3>最低利益額</h3>
           <div class="num-box"><input type="number" id="mlMinProfit" min="0" step="500" inputmode="numeric"><span>円</span></div>
+        </div>
+      </div>
+
+      <details class="adv" id="mlAdv">
+        <summary><span class="adv-title">⚙️ 詳しい設定</span><span class="adv-sub" id="mlAdvSub"></span></summary>
+      <div class="cond-grid">
+        <div class="cond-card">
+          <h3>メンズ / レディース</h3>
+          <div class="seg" id="mlGenderSeg"></div>
         </div>
         <div class="cond-card">
           <h3>最低利益率</h3>
           <div class="num-box"><input type="number" id="mlMinRoi" min="0" step="5" inputmode="numeric"><span>%</span></div>
         </div>
         <div class="cond-card">
-          <h3>取得件数 <small>仕入れ先ごと・1検索語あたり</small></h3>
+          <h3>取得件数 <small>仕入れ先ごと</small></h3>
           <div class="seg seg-presets" id="mlPerSourceSeg"></div>
           <div class="hint">ブランドが多いときは「少なめ」がおすすめです</div>
         </div>
         <div class="cond-card">
           <h3>写真の確認</h3>
-          <label class="switch-line" id="mlPhotoOcrLine"><input type="checkbox" id="mlPhotoOcr"> <span>写真のタグ読み取り（無料・Mac内OCR）</span></label>
-          <label class="switch-line" id="mlPhotoLocalLine"><input type="checkbox" id="mlPhotoLocal"> <span>写真で傷・汚れ確認（無料・Mac内AI）</span></label>
-          <label class="switch-line" id="mlPhotoCheckLine"><input type="checkbox" id="mlPhotoCheck"> <span>写真AI確認（有料・Claude API）</span></label>
+          <label class="switch-line" id="mlPhotoOcrLine"><input type="checkbox" id="mlPhotoOcr"> <span>写真のタグから型番を読む（無料）</span></label>
+          <label class="switch-line" id="mlPhotoLocalLine"><input type="checkbox" id="mlPhotoLocal"> <span>写真で傷・汚れをチェック（無料・時間がかかる）</span></label>
+          <label class="switch-line" id="mlPhotoCheckLine"><input type="checkbox" id="mlPhotoCheck"> <span>写真をAIでくわしく確認（有料・毎回オフから）</span></label>
         </div>
       </div>
 
@@ -398,13 +448,14 @@
         </span>
       </div>
       <div class="source-grid" id="mlSourceGrid"></div>
-      <label class="switch-line"><input type="checkbox" id="mlShoppingNew" data-shopping-new> <span>Yahoo!ショッピングは新品も含める（既定は中古のみ）</span></label>
+      <label class="switch-line"><input type="checkbox" id="mlShoppingNew" data-shopping-new> <span>Yahoo!ショッピングは新品も含める（ふだんは中古だけ）</span></label>
+      </details>
 
       <div class="final-box">
-        <h3>この内容でマイブランドのリサーチをします</h3>
+        <h3>この内容で探します</h3>
         <dl class="final-summary" id="mlSummary"></dl>
         <div class="final-line" id="mlFinalLine"></div>
-        <button type="button" class="start-btn" id="mlStartBtn" onclick="mlStartResearch()">🔍 マイブランドでリサーチ開始</button>
+        <button type="button" class="start-btn" id="mlStartBtn" onclick="mlStartResearch()">🔍 リサーチ開始</button>
         <div class="error-line" id="mlErrorLine" role="alert"></div>
       </div>
     </section>
@@ -419,6 +470,11 @@
           <div class="progress-cond" id="progressCond"></div>
         </div>
         <button type="button" class="stop-btn" id="stopBtn" onclick="stopResearch()">■ 中止</button>
+      </div>
+      <div class="stop-confirm" id="stopConfirm" hidden>
+        <span>リサーチを中止しますか？（ここまでに見つかった分は見られます）</span>
+        <button type="button" class="primary-btn ml-danger" onclick="stopResearch(true)">中止する</button>
+        <button type="button" class="ghost-btn" onclick="cancelStop()">続ける</button>
       </div>
 
       <div class="now-box">
@@ -440,14 +496,14 @@
         <div class="hint center">リサーチは裏で続きます。新しく見つかった案件は結果の画面に追加されます。</div>
       </div>
       <div class="hint center photo-stats" id="photoStats" hidden></div>
-      <div class="hint center" id="progressNote">候補の数は途中経過です。最後に条件（モデル・利益率・重複）で絞り込んだ件数が結果になります。</div>
+      <div class="hint center" id="progressNote">終わったら Mac の通知と音でお知らせします。</div>
       <div class="progress-actions" id="progressActions" hidden>
         <button type="button" class="primary-btn" onclick="showResultsView()">結果を見る</button>
         <button type="button" class="ghost-btn" onclick="backToConditions()">条件を変えて再検索</button>
       </div>
 
       <details class="log-box">
-        <summary>処理ログを見る（詳しい人向け）</summary>
+        <summary>動作の記録（うまくいかないときに見る）</summary>
         <pre class="log" id="logBox"></pre>
       </details>
     </div>
@@ -462,8 +518,12 @@
       </div>
       <div class="result-head-btns">
         <button type="button" class="primary-btn" onclick="backToConditions()">条件を変えて再検索</button>
-        <button type="button" class="ghost-btn" onclick="goStep(1, true)">最初から選び直す</button>
+        <button type="button" class="ghost-btn" onclick="showHome()">はじめにもどる</button>
       </div>
+    </div>
+    <div class="hist-row" id="histRow" hidden>
+      <label for="histSelect" class="filter-label">表示する結果</label>
+      <select id="histSelect" class="text-in hist-select"></select>
     </div>
 
     <div class="live-banner" id="liveBanner" hidden>
@@ -489,13 +549,30 @@
       </div>
       <div class="filter-row"><span class="filter-label">仕入れ先</span><div class="chips" id="sourceFilter"></div></div>
       <div class="filter-row"><span class="filter-label">ジャンル</span><div class="chips" id="genreFilter"></div></div>
-      <div class="filter-row" id="confFilterRow" hidden><span class="filter-label">相場の信頼度</span><div class="chips" id="confFilter"></div></div>
+      <div class="filter-row" id="confFilterRow" hidden><span class="filter-label">相場の確かさ</span><div class="chips" id="confFilter"></div></div>
+      <div class="filter-row" id="markFilterRow" hidden><span class="filter-label">印</span><div class="chips" id="markFilter"></div>
+        <label class="switch-line mark-hide"><input type="checkbox" id="hideSeen"> <span>見たものを隠す</span></label></div>
     </div>
 
     <div class="count-line" id="countLine"></div>
     <div class="card-grid" id="cardsContainer"></div>
   </section>
 </main>
+
+<div class="guide-overlay" id="guide" hidden>
+  <div class="guide-box" role="dialog" aria-modal="true" aria-labelledby="guideTitle">
+    <h2 id="guideTitle">使い方は3ステップ</h2>
+    <ol class="guide-steps">
+      <li><span class="g-num">1</span><div><b>ブランドを登録</b><p>「マイブランド」で、仕入れたいブランドとジャンルを登録します。</p></div></li>
+      <li><span class="g-num">2</span><div><b>リサーチ開始</b><p>「リサーチ開始」を押すと、ヤフオク・ラクマなどで安い商品を探します。終わったら Mac の通知と音でお知らせします。</p></div></li>
+      <li><span class="g-num">3</span><div><b>メルカリ相場を見て仕入れる</b><p>結果の「メルカリ相場を見る」で売れた値段を確かめてから仕入れます。気になる商品には「☆ 気になる」で印をつけられます。</p></div></li>
+    </ol>
+    <label class="guide-hide"><input type="checkbox" id="guideHide"> 今後は表示しない</label>
+    <button type="button" class="primary-btn guide-close" id="guideClose" onclick="closeGuide()">はじめる</button>
+    <p class="hint center">この案内は右上の「❔ 使い方」でいつでも見られます</p>
+  </div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
 <footer class="app-footer">ローカル専用（このMacの中だけで動いています）</footer>
 <script src="/ui/research.js"></script>
