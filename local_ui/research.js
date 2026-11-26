@@ -660,6 +660,29 @@ function startPolling() {
 }
 
 let polling = false;
+let sawRunning = false;   // この画面でリサーチ中を見た（終わったときだけお知らせする。開き直しただけでは出さない）
+
+// ── 終わったときのお知らせ（画面の下のお知らせ＋タブの題名。Mac の通知と音はサーバー側 app._notify） ─────
+const BASE_TITLE = document.title;
+let toastTimer = null;
+function showToast(html, ms) {
+  const t = $('toast');
+  t.innerHTML = html;
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  if (ms) toastTimer = setTimeout(() => { t.hidden = true; }, ms);
+}
+function hideToast() { $('toast').hidden = true; }
+function announceFinish(s) {
+  const n = (s.results || RESULTS).length;
+  const msg = s.state === 'done' ? `✅ リサーチが終わりました（${n}件見つかりました）`
+    : s.state === 'stopped' ? `⏹ リサーチを中止しました（ここまでに ${n}件）`
+    : '⚠ エラーでリサーチが止まりました';
+  const btn = s.state === 'error' ? '' : '<button type="button" onclick="hideToast();showResultsView()">結果を見る</button>';
+  showToast(`<span>${esc(msg)}</span>${btn}<button type="button" onclick="hideToast()" aria-label="閉じる">×</button>`, 30000);
+  if (document.hidden) document.title = `${s.state === 'error' ? '⚠' : '✅'} 終わりました - ${BASE_TITLE}`;
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) document.title = BASE_TITLE; });
 async function pollStatus() {
   if (polling) return;   // 前回の問い合わせが終わっていなければ重ねない
   polling = true;
@@ -670,6 +693,7 @@ async function pollStatusOnce() {
   let s;
   try { s = await (await fetch('/api/status')).json(); } catch (e) { return; }
   if (s.state === 'running') {
+    sawRunning = true;
     LAST = s;
     // 見つかった案件が増えた・写真確認で変わったときだけ一覧を取り直す
     if (s.live && s.live.version !== liveVersionSeen) await fetchLive();
@@ -688,6 +712,7 @@ async function pollStatusOnce() {
   RESULTS = full.results || [];
   showProgress(full);
   updateNav();
+  if (sawRunning) { sawRunning = false; announceFinish(full); }
   if (full.state === 'error') { showView('progress'); return; }
   renderResults();
   showView('result');

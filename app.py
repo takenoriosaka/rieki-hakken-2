@@ -823,20 +823,30 @@ def _run_job(req: dict):
             JOB.live = None
             JOB.error = str(e)
             JOB.finished_at = datetime.now().isoformat(timespec="seconds")
-        _notify("リサーチが止まりました（エラー）", "画面を開いて内容を確認してください")
+        _notify("リサーチが止まりました（エラー）", "画面を開いて内容を確認してください", error=True)
 
 
-def _notify(title: str, message: str) -> None:
-    """Mac の通知センターに通知を出して音を鳴らす（osascript。失敗しても何もしない。RIEKI_NO_NOTIFY=1 で出さない）"""
+def _notify(title: str, message: str, error: bool = False) -> None:
+    """Mac の通知センターに通知を出し、音を鳴らす（osascript ＋ afplay。通知を切っている Mac でも音は鳴る）。
+    失敗しても何もしない。RIEKI_NO_NOTIFY=1 で出さない"""
     if sys.platform != "darwin" or os.environ.get("RIEKI_NO_NOTIFY") == "1":
         return
+    import subprocess
+
+    def q(t):
+        return '"' + str(t).replace("\\", "\\\\").replace('"', '\\"') + '"'
+    quiet = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     try:
-        import subprocess
-        q = lambda t: '"' + str(t).replace("\\", "\\\\").replace('"', '\\"') + '"'
-        script = f'display notification {q(message)} with title {q("利益発見ツール2")} subtitle {q(title)} sound name "Glass"'
-        subprocess.Popen(["osascript", "-e", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        script = f'display notification {q(message)} with title {q("利益発見ツール2")} subtitle {q(title)}'
+        subprocess.Popen(["osascript", "-e", script], **quiet)
     except Exception as e:
         print(f"[app] 通知エラー: {e}")
+    sound = "/System/Library/Sounds/" + ("Basso.aiff" if error else "Glass.aiff")
+    try:
+        if os.path.exists(sound):
+            subprocess.Popen(["afplay", sound], **quiet)
+    except Exception:
+        pass
 
 
 def _finish_job(results: list[dict]) -> None:
