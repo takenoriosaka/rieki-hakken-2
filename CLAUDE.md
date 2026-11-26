@@ -9,17 +9,23 @@
 
 ## 仲間への配布（2026-11-18 追加）
 - 仲間に送る1行（ターミナルに貼る）: `bash <(curl -fsSL https://raw.githubusercontent.com/takenoriosaka/rieki-hakken-2/main/setup_for_friend.command)`
-  → ~/rieki-hakken-2 に clone（ログイン不要）・uv で Python 3.12 venv・Chromium・ブランド一覧のパスワード入力・デスクトップ「利益発見ツール2.command」（青）・8766 で起動。
-  元の利益発見ツール（~/rieki-hakken・8765・「利益発見ツール」）と同じ Mac に入れても衝突しない。テスト用の環境変数は RIEKI2_DIR / RIEKI2_DESKTOP / RIEKI2_BRANCH / RIEKI2_BRANDS_PASSWORD / RIEKI_SKIP_PLAYWRIGHT / RIEKI_NO_LAUNCH。
+  → ~/rieki-hakken-2 に clone（ログイン不要）・uv で Python 3.12 venv・Chromium・ブランド一覧の取り込み（パスワード不要）・デスクトップ「利益発見ツール2.command」（青）・8766 で起動。
+  元の利益発見ツール（~/rieki-hakken・8765・「利益発見ツール」）と同じ Mac に入れても衝突しない。テスト用の環境変数は RIEKI2_DIR / RIEKI2_DESKTOP / RIEKI2_BRANCH / RIEKI2_BRANDS_PASSWORD（暗号化方式のときだけ）/ RIEKI_SKIP_PLAYWRIGHT / RIEKI_NO_LAUNCH。
 - `start.command` は起動前に git fetch → 新版があれば `git pull --ff-only`。`.rieki_friend_mode`（仲間の Mac だけ。本人の Mac に置かないこと）があれば追跡ファイルの変更を stash してから更新。
   本人の Mac（マーカーなし）は未コミット変更に触れない（ff できなければ警告だけ）。
-- **ブランド一覧（物販ONEのブランド一覧の書き写し）は暗号化して配る**: `brands.enc`（scrypt＋AES-256-GCM。中身は course_brands.json のブランド名・英字・グループ・ジャンルだけ）。
-  平文の course_brands.json・course_genre_notes.*・my_list.json は絶対にコミットしない（.gitignore 済み）。
-  - 本人: course_brands.json を直したら `./venv/bin/python export_brands.py` → `git add brands.enc` → commit → push。パスワードは `.brands_password`（git 管理外・600）。
-  - 仲間: セットアップ時に1回だけパスワードを聞く（`set_brands_password.command`、osascript の hidden answer。3回まで・「あとで」可）。合っていれば `.brands_password` に保存し取り込む。
-    以後 start.command（`sync_brands`、仲間の Mac だけ）が brands.enc の SHA-256（`.brands_enc.sha256`）が変わったときだけ `brands_sync.py --auto` で取り込む。パスワード未入力なら起動時に1回入力画面（「あとで」でそのまま起動）。
+- **ブランド一覧（物販ONEのブランド一覧の書き写し）は 2026-11-26 から平文 `brands.json`（git 管理・public）で配る**（ユーザーがリスクを承知で選択。それまでは暗号化 brands.enc＋パスワード）。
+  中身はブランド名（name_ja）・英字（name_en）・グループ・ジャンルだけ（9グループ・399件。note/メモは入れない）。
+  course_brands.json・course_genre_notes.*（教材要約）・my_list.json・.brands_password は絶対にコミットしない（.gitignore 済み）。
+  - 本人: course_brands.json を直したら `./venv/bin/python export_brands.py`（brands.json があれば brands.json を作り直す）→ `git add brands.json` → commit → push。
+  - 仲間: パスワード入力はなし。setup の 5/7 と start.command の `sync_brands`（仲間の Mac だけ）が `brands_sync.py --auto` を呼び、
+    brands.json の SHA-256（`.brands_json.sha256`、git 管理外）が変わったときだけ取り込む。
+    brands_sync.py は brands.json があれば `--set-password`/`--check` もパスワードを見ず、set_brands_password.command も入力画面を出さず取り込むだけ
+    （更新直後の起動は古い start.command がメモリ上で動くため。.brands_password の有無どちらの仲間もパスワード画面は出ない）。
   - 取り込みは `my_list.import_course_new_only`: 取り込んだ名前（正規化）を my_list.json の `course_imported` に記録し、記録済み・同名ありは足さない。
-    仲間が追加・編集・削除・オン/オフした登録は上書きも復活もしない。足した分はオフ（ルイヴィトンだけオン）。パスワード違い・未入力でもツールは起動する（一覧が空なだけ）。
+    仲間が追加・編集・削除・オン/オフした登録は上書きも復活もしない（既に brands.enc から取り込んだ仲間は二重にならない）。足した分はオフ（ルイヴィトンだけオン）。
+  - 暗号化の仕組み（brands.enc・export_brands.py --enc・brands_sync.py・set_brands_password.command・.brands_password）は残置。brands.json が無いときだけ従来どおり動く。
+  - **暗号化方式（B案など）に戻すとき**: `./venv/bin/python export_brands.py --enc` → `git rm brands.json` → `git add brands.enc` → commit → push（各スクリプトは brands.json が無ければ自動でパスワード方式に戻る。使い方案内①の文言も戻す）。
+    ただし一度 public に平文を置いた履歴は消えない。
 
 ## プロジェクト概要
 ヤフオク・メルカリ・セカストから転売案件を自動スキャンし、Webダッシュボードで確認するPythonツール。

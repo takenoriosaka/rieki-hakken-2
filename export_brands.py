@@ -1,8 +1,15 @@
 """
-【本人の Mac 用】ブランド一覧（course_brands.json。git 管理外）をパスワードで暗号化して brands.enc を作り直す
+【本人の Mac 用】ブランド一覧（course_brands.json。git 管理外）から、仲間に配るファイルを作り直す
 
+【2026-11-26〜 平文方式】brands.json（平文・git 管理）があれば、brands.json を書き出す（パスワード不要）。
+  ./venv/bin/python export_brands.py           # brands.json があれば brands.json を作り直す
+  ./venv/bin/python export_brands.py --plain   # brands.json を書き出す（初めて作るとき）
+  ./venv/bin/python export_brands.py --enc     # 暗号化した brands.enc を書き出す（暗号化方式に戻すとき）
+  → git add brands.json → commit → push。中身はブランド名・英字・グループ・ジャンルだけ。
+
+【暗号化方式（--enc、または brands.json が無いとき）】
 使い方:
-  ./venv/bin/python export_brands.py [course_brands.json のパス]
+  ./venv/bin/python export_brands.py --enc [course_brands.json のパス]
   → brands.enc を書き出したら、git add brands.enc → commit → push すると、仲間の Mac では次の起動時に
     「まだ取り込んだことのないブランドだけ」自動で追加される（仲間が消したり変えたりした登録はそのまま）。
 
@@ -34,7 +41,11 @@ def new_password(n: int = 12) -> str:
 
 
 def main() -> int:
-    src_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(brands_sync.BASE_DIR, "course_brands.json")
+    args = sys.argv[1:]
+    want_plain, want_enc = "--plain" in args, "--enc" in args
+    args = [a for a in args if a not in ("--plain", "--enc")]
+    plain = want_plain or (not want_enc and brands_sync.plain_mode())
+    src_path = args[0] if args else os.path.join(brands_sync.BASE_DIR, "course_brands.json")
     if not os.path.exists(src_path):
         print(f"ファイルがありません: {src_path}")
         return 1
@@ -52,6 +63,27 @@ def main() -> int:
                            "genres": list(b.get("genres") or []), "note": str(b.get("note") or "")})
         out["groups"].append({"group": str(g.get("group") or ""), "brands": brands})
         n += len(brands)
+
+    if plain:
+        # 平文: メモ（note）は入れない（ブランド名・英字・グループ・ジャンルだけ）
+        for g in out["groups"]:
+            for b in g["brands"]:
+                b.pop("note", None)
+        # 差分が読みやすいようにブランド1件=1行
+        lines = ['{"source": ' + json.dumps(out["source"], ensure_ascii=False) + ', "groups": [']
+        for gi, g in enumerate(out["groups"]):
+            lines.append(' {"group": ' + json.dumps(g["group"], ensure_ascii=False) + ', "brands": [')
+            for bi, b in enumerate(g["brands"]):
+                lines.append('  ' + json.dumps(b, ensure_ascii=False) + ("," if bi < len(g["brands"]) - 1 else ""))
+            lines.append(' ]}' + ("," if gi < len(out["groups"]) - 1 else ""))
+        lines.append(']}')
+        text = "\n".join(lines) + "\n"
+        assert json.loads(text) == out
+        with open(brands_sync.PLAIN_PATH, "w", encoding="utf-8") as f:
+            f.write(text)
+        print(f"brands.json を書き出しました（{len(out['groups'])}グループ・{n}件。平文・パスワードなし）。")
+        print("仲間に届けるには: git add brands.json && git commit && git push")
+        return 0
 
     pw = brands_sync.read_saved_password()
     created = False

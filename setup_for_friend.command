@@ -7,7 +7,7 @@
 #    2. ツール本体をダウンロード（~/rieki-hakken-2。公開リポジトリなのでログイン不要）
 #    3. Python とライブラリを準備（uv を使用。管理者パスワード不要）
 #    4. ブラウザ部品（Chromium）を準備
-#    5. ブランド一覧のパスワードを聞いて、マイブランド登録に取り込む（1回だけ。「あとで」でも OK）
+#    5. ブランド一覧をマイブランド登録に取り込む（パスワード不要）
 #    6. デスクトップに「利益発見ツール2」を作成（青いアイコン）
 #    7. ツールを起動してブラウザで画面を開く（http://127.0.0.1:8766）
 #
@@ -25,7 +25,7 @@
 
 # --- 設定（テスト時は環境変数で差し替え可能） ---
 #   RIEKI2_REPO_URL / RIEKI2_DIR / RIEKI2_DESKTOP / RIEKI2_UV_DIR / RIEKI2_BRANCH
-#   RIEKI2_BRANDS_PASSWORD（ブランド一覧のパスワードをダイアログなしで渡す）
+#   RIEKI2_BRANDS_PASSWORD（暗号化方式に戻したときだけ: ブランド一覧のパスワードをダイアログなしで渡す）
 #   RIEKI_SKIP_PLAYWRIGHT=1 / RIEKI_NO_LAUNCH=1 / RIEKI_NO_PAUSE=1
 REPO_URL="${RIEKI2_REPO_URL:-https://github.com/takenoriosaka/rieki-hakken-2.git}"
 BRANCH="${RIEKI2_BRANCH:-}"
@@ -204,11 +204,17 @@ step_playwright() {
 }
 
 # ---------------------------------------------------------------------
-# 5/7 ブランド一覧（物販ONEのブランド一覧。暗号化ファイル brands.enc）
+# 5/7 ブランド一覧（物販ONEのブランド一覧。平文の brands.json。無ければ暗号化ファイル brands.enc）
 # ---------------------------------------------------------------------
 step_brands() {
     step 5 "ブランド一覧を準備しています…"
     cd "$APP_DIR" || exit 1
+    if [ -f brands.json ]; then
+        # 平文方式: パスワード不要。まだ取り込んでいないブランドだけ追加
+        ./venv/bin/python brands_sync.py --auto
+        ok "ブランド一覧を準備しました"
+        return
+    fi
     if [ ! -f brands.enc ]; then
         echo "  （ブランド一覧のファイルがまだありません。飛ばします）"
         return

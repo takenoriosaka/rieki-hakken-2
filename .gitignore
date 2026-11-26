@@ -44,3 +44,5 @@ course_genre_notes.md
 # ブランド一覧（brands.enc）のパスワードと、前回取り込んだ brands.enc の印（brands_sync.py / export_brands.py。公開しない）
 .brands_password
 .brands_enc.sha256
+# 前回取り込んだ brands.json（平文のブランド一覧。こちらは git 管理）の印
+.brands_json.sha256

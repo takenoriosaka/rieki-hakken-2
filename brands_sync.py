@@ -1,5 +1,13 @@
 """
-ブランド一覧（物販ONEのブランド一覧）の暗号化ファイル brands.enc を復号して、マイブランド登録（my_list.json）に取り込む
+ブランド一覧（物販ONEのブランド一覧）を、マイブランド登録（my_list.json）に取り込む
+
+【2026-11-26〜 平文方式】リポジトリに平文の brands.json があれば、そちらを使う（パスワード不要）。
+・brands.json の SHA-256 を .brands_json.sha256 に控え、変わったときだけ取り込む（--auto）。
+・この方式では --set-password / --check もパスワードを見ずに brands.json を取り込む／成功扱いにする
+  （古い start.command・setup から呼ばれても、パスワード画面を出さずに済むように）。
+・brands.json が無いときだけ、下の暗号化方式（brands.enc）で動く。暗号化方式に戻すときは brands.json を git rm するだけ。
+
+【暗号化方式（brands.json が無いとき）】
 
 ・brands.enc はパスワードで暗号化してあり（scrypt で鍵を作って AES-256-GCM）、パスワードを知らないと中身は読めない。
   作り直すのは本人の Mac の export_brands.py。
@@ -28,6 +36,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENC_PATH = os.path.join(BASE_DIR, "brands.enc")
 PASSWORD_PATH = os.path.join(BASE_DIR, ".brands_password")
 STAMP_PATH = os.path.join(BASE_DIR, ".brands_enc.sha256")
+PLAIN_PATH = os.path.join(BASE_DIR, "brands.json")          # 平文方式（あればこちらを使う）
+PLAIN_STAMP_PATH = os.path.join(BASE_DIR, ".brands_json.sha256")
+
+
+def plain_mode() -> bool:
+    return os.path.exists(PLAIN_PATH)
 
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 15, 8, 1
 AAD = b"rieki-hakken-2 brands v1"
@@ -126,7 +140,34 @@ def _report(r: dict) -> None:
         print(f"ブランド一覧に新しいブランドはありませんでした（マイブランド登録 全{r['total']}件）。")
 
 
+def import_plain(force: bool = False) -> dict | None:
+    """brands.json を取り込む。前回と同じ中身（SHA-256）なら None（force なら必ず取り込む）"""
+    with open(PLAIN_PATH, "rb") as f:
+        blob = f.read()
+    h = hashlib.sha256(blob).hexdigest()
+    try:
+        with open(PLAIN_STAMP_PATH, encoding="utf-8") as f:
+            old = f.read().strip()
+    except OSError:
+        old = ""
+    if h == old and not force:
+        return None
+    src = json.loads(blob.decode("utf-8"))
+    sys.path.insert(0, BASE_DIR)
+    import my_list
+    r = my_list.import_course_new_only(src)
+    with open(PLAIN_STAMP_PATH, "w", encoding="utf-8") as f:
+        f.write(h + "\n")
+    return r
+
+
 def cmd_auto() -> int:
+    if plain_mode():
+        r = import_plain()
+        if r is not None:
+            print("ブランド一覧を取り込みました。" if r["added"] else "ブランド一覧を確認しました。")
+            _report(r)
+        return 0
     if not os.path.exists(ENC_PATH):
         return 0
     pw = read_saved_password()
@@ -150,6 +191,8 @@ def cmd_auto() -> int:
 
 def cmd_set_password() -> int:
     """終了コード: 0=合っていて取り込んだ / 2=パスワードが違う / 3=空 / 1=その他の失敗"""
+    if plain_mode():   # 平文方式: パスワードは見ない
+        return cmd_auto()
     pw = normalize_password(sys.stdin.readline())
     if not pw:
         return 3
@@ -167,6 +210,8 @@ def cmd_set_password() -> int:
 
 
 def cmd_check() -> int:
+    if plain_mode():   # 平文方式: パスワード不要なので常に「入力済み」扱い
+        return 0
     pw = read_saved_password()
     if not pw or not os.path.exists(ENC_PATH):
         return 1
