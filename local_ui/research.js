@@ -728,6 +728,7 @@ async function pollStatusOnce() {
   showProgress(full);
   updateNav();
   if (sawRunning) { sawRunning = false; announceFinish(full); }
+  loadHistory();
   if (full.state === 'error') { showView('progress'); return; }
   renderResults();
   showView('result');
@@ -968,7 +969,49 @@ function showResultsView() {
   if (PENDING) { RESULTS = PENDING; PENDING = null; }
   renderResults();
   showView('result');
+  loadHistory();
 }
+
+// ── 前回の結果（直近5回。サーバーの local_results/history/）を結果の画面で選べる ─────
+let HIST = [];
+async function loadHistory() {
+  try { const d = await (await fetch('/api/history')).json(); HIST = d.ok ? d.items || [] : []; } catch (e) { HIST = []; }
+  renderHistRow();
+}
+function histModeLabel(c) {
+  const m = c && c.mode;
+  return m === 'list' ? 'マイブランド' : m === 'free' ? `自由に探す（${joinShort((c.free_brands || []), 2)}）` : '型番で探す';
+}
+function renderHistRow() {
+  const row = $('histRow');
+  if (!row) return;
+  row.hidden = !HIST.length || isRunning();
+  if (row.hidden) return;
+  const cur = LAST && LAST.finished_at;
+  const fmt = t => String(t || '').replace('T', ' ').slice(5, 16).replace('-', '/');
+  $('histSelect').innerHTML = HIST.map((h, i) => {
+    const label = `${i === 0 ? '最新' : i === 1 ? '前回' : `${i}回前`}：${fmt(h.finished_at)}・${histModeLabel(h.conditions)}・${h.count}件${h.state === 'stopped' ? '（中止）' : ''}`;
+    return `<option value="${esc(h.id)}" ${h.finished_at === cur ? 'selected' : ''}>${esc(label)}</option>`;
+  }).join('');
+}
+async function openHistory(id) {
+  if (isRunning()) return;
+  try {
+    const d = await (await fetch(`/api/history/${encodeURIComponent(id)}`)).json();
+    if (!d.ok) throw new Error(d.error || '');
+    LAST = d.snapshot;
+    RESULTS = LAST.results || [];
+    PENDING = null;
+    filterSource = ''; filterGenre = ''; filterConf = '';
+    renderResults();
+    updateNav();
+    window.scrollTo(0, 0);
+  } catch (e) {
+    showToast('<span>⚠ その結果を開けませんでした</span>', 5000);
+    renderHistRow();
+  }
+}
+document.addEventListener('change', e => { if (e.target && e.target.id === 'histSelect') openHistory(e.target.value); });
 
 async function loadMarks() {
   try { const d = await (await fetch('/api/marks')).json(); if (d.ok && d.marks) MARKS = d.marks; } catch (e) { /* 印なしで続ける */ }
@@ -1005,6 +1048,7 @@ function renderResults() {
   const s = LAST || {};
   const running = s.state === 'running';
   renderLiveBanner();
+  renderHistRow();
   const metaParts = [];
   const stateLabel = { done: '完了', stopped: '途中で中止（ここまでの結果）', error: 'エラー' }[s.state];
   if (running) metaParts.push('リサーチ実行中（ここまでに見つかった案件）');
