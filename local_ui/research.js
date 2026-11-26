@@ -541,6 +541,7 @@ function saveState() {
     c.photo_local = !!cond.photo_local;
     c.photo_local_v = PHOTO_LOCAL_DEFAULT_VERSION;
     c.sources_v2 = 1;   // Yahoo!ショッピング追加後の保存の印
+    c.photo_check = false;   // 有料の写真AI確認は保存しない（毎回オフから。restoreState でも読まない）
     localStorage.setItem(STORAGE_KEY, JSON.stringify(c));
   } catch (e) { /* 保存できなくても動作には影響なし */ }
 }
