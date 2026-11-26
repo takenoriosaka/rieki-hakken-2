@@ -31,6 +31,12 @@ let currentSort = 'profit';
 let filterSource = '';
 let filterGenre = '';
 let filterConf = '';
+// 結果カードの印（☆気になる / ✓見た）。保存はサーバーの local_results/marks.json（出品URLごと。次のリサーチで同じ商品が出ても残る）
+let MARKS = {};
+let filterMark = '';            // '' = すべて / 'star' = 気になるだけ
+const HIDE_SEEN_KEY = 'rieki-hide-seen-v1';
+let hideSeen = false;
+try { hideSeen = localStorage.getItem(HIDE_SEEN_KEY) === '1'; } catch (e) { hideSeen = false; }
 let pollTimer = null;
 let tickTimer = null;
 let lastRunning = null;        // 実行中ステータス（経過時間の毎秒更新用）
@@ -463,6 +469,10 @@ document.addEventListener('click', e => {
   if (fc) { filterConf = fc.dataset.fconf; renderResults(); return; }
   const fg = e.target.closest('[data-fgenre]');
   if (fg) { filterGenre = fg.dataset.fgenre; renderResults(); return; }
+  const fm = e.target.closest('[data-fmark]');
+  if (fm) { filterMark = fm.dataset.fmark; renderResults(); return; }
+  const mk = e.target.closest('[data-mark]');
+  if (mk) { toggleMark(mk.dataset.url, mk.dataset.mark); return; }
 });
 
 document.addEventListener('toggle', e => {
@@ -490,6 +500,11 @@ document.addEventListener('change', e => {
   if (typeof handleListChange === 'function' && handleListChange(e)) return;
   if (handleFreeChange(e)) return;
   if (e.target.id === 'auctionOnly') { cond.auction_only = e.target.checked; saveState(); renderFinal(); }
+  if (e.target.id === 'hideSeen') {
+    hideSeen = e.target.checked;
+    try { localStorage.setItem(HIDE_SEEN_KEY, hideSeen ? '1' : '0'); } catch (err) { /* なくても動く */ }
+    renderResults();
+  }
   if (e.target.id === 'photoCheck') { cond.photo_check = e.target.checked; saveState(); renderFinal(); }
   if (e.target.id === 'photoLocal') { cond.photo_local = e.target.checked; saveState(); renderFinal(); }
   if (e.target.id === 'photoOcr') { cond.photo_ocr = e.target.checked; saveState(); renderFinal(); }
@@ -955,6 +970,35 @@ function showResultsView() {
   showView('result');
 }
 
+async function loadMarks() {
+  try { const d = await (await fetch('/api/marks')).json(); if (d.ok && d.marks) MARKS = d.marks; } catch (e) { /* 印なしで続ける */ }
+}
+function markOf(url) { return MARKS[url] || {}; }
+async function toggleMark(url, kind) {
+  if (!url || !['star', 'seen'].includes(kind)) return;
+  const before = { ...markOf(url) };
+  const on = !before[kind];
+  MARKS[url] = { ...before, [kind]: on };   // すぐ見た目に反映（保存はサーバー）
+  renderResults();
+  try {
+    const d = await (await fetch('/api/marks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, [kind]: on }) })).json();
+    if (!d.ok) throw new Error(d.error || '');
+    if (d.mark && (d.mark.star || d.mark.seen)) MARKS[url] = d.mark; else delete MARKS[url];
+    if (kind === 'seen' && on && hideSeen) showToast('<span>✓「見た」にしました（「見たものを隠す」で隠れています）</span>', 4000);
+  } catch (e) {
+    MARKS[url] = before;
+    renderResults();
+    showToast('<span>⚠ 印を保存できませんでした（サーバーを再起動してみてください）</span>', 6000);
+  }
+}
+function markButtonsHtml(d) {
+  const m = markOf(d.url), u = esc(d.url || '');
+  return `<div class="mark-btns">
+    <button type="button" class="mark-btn mark-star ${m.star ? 'on' : ''}" data-mark="star" data-url="${u}" aria-pressed="${!!m.star}">${m.star ? '★ 気になる' : '☆ 気になる'}</button>
+    <button type="button" class="mark-btn mark-seen ${m.seen ? 'on' : ''}" data-mark="seen" data-url="${u}" aria-pressed="${!!m.seen}">${m.seen ? '✓ 見た' : '見た'}</button>
+  </div>`;
+}
+
 function profitTier(p) { return p >= 10000 ? 'high' : p >= 5000 ? 'mid' : 'low'; }
 
 function renderResults() {
@@ -999,10 +1043,16 @@ function renderResults() {
   $('genreFilter').innerHTML = chip('data-fgenre', '', 'すべて', all.length, filterGenre) +
     Object.keys(genCounts).map(k => chip('data-fgenre', k, `${GENRE_ICONS[k] || ''} ${k || 'その他'}`, genCounts[k], filterGenre)).join('');
   document.querySelectorAll('#sortSeg [data-sort]').forEach(b => b.classList.toggle('on', b.dataset.sort === currentSort));
+  const starN = all.filter(r => markOf(r.url).star).length, seenN = all.filter(r => markOf(r.url).seen).length;
+  $('markFilterRow').hidden = !all.length;
+  $('markFilter').innerHTML = chip('data-fmark', '', 'すべて', all.length, filterMark) + chip('data-fmark', 'star', '☆ 気になるだけ', starN, filterMark);
+  $('hideSeen').checked = hideSeen;
+  $('hideSeen').nextElementSibling.textContent = `見たものを隠す（${seenN}件）`;
 
   const items = all
     .filter(r => (!filterSource || r.source === filterSource) && (!filterGenre || r.category === filterGenre)
-      && (!filterConf || (r.free_info && r.free_info.confidence === filterConf)))
+      && (!filterConf || (r.free_info && r.free_info.confidence === filterConf))
+      && (filterMark !== 'star' || markOf(r.url).star) && (!hideSeen || !markOf(r.url).seen))
     .sort((a, b) => {
       if (currentSort === 'roi') return b.roi_percent - a.roi_percent;
       if (currentSort === 'remain') {
@@ -1033,7 +1083,7 @@ function renderResults() {
     return;
   }
   if (!items.length) {
-    container.innerHTML = '<div class="empty"><div class="empty-title">この絞り込みに該当する商品はありません</div></div>';
+    container.innerHTML = `<div class="empty"><div class="empty-title">この絞り込みに当てはまる商品はありません</div>${hideSeen || filterMark ? '<div class="empty-text">「印」の「すべて」を選ぶか、「見たものを隠す」のチェックを外すと表示されます。</div>' : ''}</div>`;
     return;
   }
   container.innerHTML = items.map(d => {
@@ -1063,12 +1113,13 @@ function renderResults() {
     const mercariTitle = `メルカリで『${mercariText}』を売り切れ・新しい順で検索`;
     const kindSearchUrl = `https://shop.kind.co.jp/search?q=${encodeURIComponent(searchText)}`;  // 手動で開くだけ（ツールからは取得しない）
     return `
-    <article class="card">
+    <article class="card${markOf(d.url).seen ? ' is-seen' : ''}${markOf(d.url).star ? ' is-star' : ''}">
       <a class="card-media" href="${esc(d.url)}" target="_blank" rel="noopener">
         ${img}
         <span class="media-src">${SOURCE_ICONS[d.source] || ''} ${esc(srcLabel)}</span>
       </a>
       <div class="card-body">
+        ${markButtonsHtml(d)}
         <div class="profit-box tier-${tier}">
           <div class="profit-label">見込み利益</div>
           <div class="profit-value">+${yen(d.estimated_profit)}</div>
@@ -1419,6 +1470,7 @@ async function init() {
     return;
   }
   try { restoreState(); } catch (e) { console.warn('前回の選択を復元できませんでした', e); }
+  await loadMarks();
   // 最初は「はじめに（何をしたい？の3択）」。型番で探す画面はステップ1から
   currentStep = 1;
   showHome();
