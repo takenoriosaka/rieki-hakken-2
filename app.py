@@ -51,6 +51,14 @@ UI_DIR = os.path.join(BASE_DIR, "local_ui")
 ASSETS_DIR = os.path.join(BASE_DIR, "dashboard_assets")
 RESULT_DIR = os.path.join(BASE_DIR, "local_results")
 LAST_RESULT_PATH = os.path.join(RESULT_DIR, "last_result.json")
+# 直近のリサーチ結果（何回分か）。画面の結果の「前回の結果」で選べる（local_results/ は .gitignore 済み）
+HISTORY_DIR = os.path.join(RESULT_DIR, "history")
+HISTORY_KEEP = 5
+_HISTORY_ID_RE = re.compile(r"^\d{8}-\d{6}(?:-\d+)?$")
+# 結果カードの「☆気になる」「✓見た」の印（出品URLごと。local_results/ に保存・共有しない）
+MARKS_PATH = os.path.join(RESULT_DIR, "marks.json")
+MARKS_KEEP = 5000
+_marks_lock = threading.Lock()
 
 # 「オメガ シーマスター」の2語目がモデル名かどうか判定するときに除外する一般名詞
 _GENERIC_WORDS = {"時計", "腕時計", "ダウン", "ダウンコート", "サングラス", "ジュエリー", "アクセサリー", "スカーフ", "バッグ", "財布"}
@@ -815,6 +823,20 @@ def _run_job(req: dict):
             JOB.live = None
             JOB.error = str(e)
             JOB.finished_at = datetime.now().isoformat(timespec="seconds")
+        _notify("リサーチが止まりました（エラー）", "画面を開いて内容を確認してください")
+
+
+def _notify(title: str, message: str) -> None:
+    """Mac の通知センターに通知を出して音を鳴らす（osascript。失敗しても何もしない。RIEKI_NO_NOTIFY=1 で出さない）"""
+    if sys.platform != "darwin" or os.environ.get("RIEKI_NO_NOTIFY") == "1":
+        return
+    try:
+        import subprocess
+        q = lambda t: '"' + str(t).replace("\\", "\\\\").replace('"', '\\"') + '"'
+        script = f'display notification {q(message)} with title {q("利益発見ツール2")} subtitle {q(title)} sound name "Glass"'
+        subprocess.Popen(["osascript", "-e", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        print(f"[app] 通知エラー: {e}")
 
 
 def _finish_job(results: list[dict]) -> None:
@@ -826,6 +848,10 @@ def _finish_job(results: list[dict]) -> None:
         JOB.finished_at = datetime.now().isoformat(timespec="seconds")
     print(f"ローカル リサーチ完了: {len(results)} 件")
     _save_last()
+    if JOB.stop_requested:
+        _notify("リサーチを中止しました", f"ここまでに見つかった案件: {len(results)}件")
+    else:
+        _notify("リサーチが終わりました", f"見つかった案件: {len(results)}件")
 
 
 def _save_last():
@@ -834,8 +860,69 @@ def _save_last():
         snap = JOB.snapshot(with_results=True)
         with open(LAST_RESULT_PATH, "w", encoding="utf-8") as f:
             json.dump(snap, f, ensure_ascii=False)
+        _save_history(snap)
     except Exception as e:
         print(f"[app] 結果保存エラー: {e}")
+
+
+def _history_id(snap: dict) -> str:
+    t = str(snap.get("finished_at") or snap.get("started_at") or datetime.now().isoformat(timespec="seconds"))
+    d = re.sub(r"[^0-9]", "", t)[:14].ljust(14, "0")   # 2026-11-24T21:38:19 → 20261124213819
+    return f"{d[:8]}-{d[8:]}"
+
+
+def _save_history(snap: dict) -> None:
+    """終わったリサーチを local_results/history/ に1回1ファイルで保存し、新しい HISTORY_KEEP 回分だけ残す"""
+    os.makedirs(HISTORY_DIR, exist_ok=True)
+    hid = _history_id(snap)
+    path = os.path.join(HISTORY_DIR, hid + ".json")
+    n = 1
+    while os.path.exists(path):
+        n += 1
+        path = os.path.join(HISTORY_DIR, f"{hid}-{n}.json")
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(snap, f, ensure_ascii=False)
+    os.replace(tmp, path)
+    for old in _history_files()[HISTORY_KEEP:]:
+        try:
+            os.remove(os.path.join(HISTORY_DIR, old))
+        except OSError:
+            pass
+
+
+def _history_files() -> list[str]:
+    """保存済みの結果のファイル名（新しい順）"""
+    try:
+        names = [n for n in os.listdir(HISTORY_DIR) if n.endswith(".json") and _HISTORY_ID_RE.match(n[:-5])]
+    except FileNotFoundError:
+        return []
+    return sorted(names, reverse=True)
+
+
+def _migrate_history() -> None:
+    """履歴の仕組みを入れる前の last_result.json を、履歴の1件目として取り込む（1回だけ）"""
+    if _history_files() or not os.path.exists(LAST_RESULT_PATH):
+        return
+    try:
+        with open(LAST_RESULT_PATH, encoding="utf-8") as f:
+            snap = json.load(f)
+        if snap.get("state") in ("done", "stopped"):
+            _save_history(snap)
+    except Exception as e:
+        print(f"[app] 前回結果の履歴への取り込みエラー: {e}")
+
+
+def _load_marks() -> dict:
+    try:
+        with open(MARKS_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print(f"[app] 印の読み込みエラー: {e}")
+        return {}
 
 
 def _load_last():
@@ -928,6 +1015,75 @@ def api_stop():
     return jsonify({"ok": True})
 
 
+@app.get("/api/history")
+def api_history():
+    """直近のリサーチ結果の一覧（新しい順。結果の中身は含まない）"""
+    out = []
+    for name in _history_files():
+        try:
+            with open(os.path.join(HISTORY_DIR, name), encoding="utf-8") as f:
+                snap = json.load(f)
+        except Exception:
+            continue
+        out.append({"id": name[:-5], "state": snap.get("state"), "finished_at": snap.get("finished_at"),
+                    "started_at": snap.get("started_at"), "count": len(snap.get("results") or []),
+                    "conditions": snap.get("conditions") or {}})
+    return jsonify({"ok": True, "items": out})
+
+
+@app.get("/api/history/<hid>")
+def api_history_item(hid):
+    if not _HISTORY_ID_RE.match(hid or ""):
+        return jsonify({"ok": False, "error": "見つかりません"}), 404
+    try:
+        with open(os.path.join(HISTORY_DIR, hid + ".json"), encoding="utf-8") as f:
+            snap = json.load(f)
+    except FileNotFoundError:
+        return jsonify({"ok": False, "error": "見つかりません"}), 404
+    for r in snap.get("results") or []:
+        if isinstance(r, dict) and r.get("category"):
+            r["category"] = _cat(r["category"])
+    return jsonify({"ok": True, "snapshot": snap})
+
+
+@app.get("/api/marks")
+def api_marks():
+    with _marks_lock:
+        return jsonify({"ok": True, "marks": _load_marks()})
+
+
+@app.post("/api/marks")
+def api_marks_set():
+    """{url, star?, seen?}。両方 false になった URL は消す"""
+    b = request.get_json(silent=True) or {}
+    url = str(b.get("url") or "").strip()
+    if not url.startswith(("http://", "https://")) or len(url) > 2000:
+        return jsonify({"ok": False, "error": "URL が正しくありません"}), 400
+    with _marks_lock:
+        marks = _load_marks()
+        m = dict(marks.get(url) or {})
+        for k in ("star", "seen"):
+            if k in b:
+                m[k] = b.get(k) is True
+        if m.get("star") or m.get("seen"):
+            m["t"] = int(time.time())
+            marks[url] = m
+        else:
+            marks.pop(url, None)
+        if len(marks) > MARKS_KEEP:
+            for k, _ in sorted(marks.items(), key=lambda kv: kv[1].get("t", 0))[:len(marks) - MARKS_KEEP]:
+                marks.pop(k, None)
+        try:
+            os.makedirs(RESULT_DIR, exist_ok=True)
+            tmp = MARKS_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(marks, f, ensure_ascii=False)
+            os.replace(tmp, MARKS_PATH)
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"保存できませんでした: {e}"}), 500
+    return jsonify({"ok": True, "mark": marks.get(url) or {}})
+
+
 # ── マイブランド登録（my_list.json。画面のヘッダー「マイブランド登録」） ─────────────────────
 
 def _list_ok(extra: dict | None = None):
@@ -1010,6 +1166,7 @@ def api_mylist_defaults():
 
 if __name__ == "__main__":
     _load_last()
+    _migrate_history()
     url = f"http://{HOST}:{PORT}"
     print(f"利益発見ツール2 のリサーチ画面: {url}  （終了するにはこのウィンドウで Ctrl+C）")
     if os.environ.get("RIEKI_NO_BROWSER") != "1":
