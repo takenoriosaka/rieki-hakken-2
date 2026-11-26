@@ -139,10 +139,10 @@ GENRES: list[dict] = [
     {"key": "tie", "label": "ネクタイ", "icon": "👔", "queries": ["ネクタイ"],
      "hint": "ネクタイ・ボウタイ/蝶ネクタイ（ネクタイピンは小物）",
      "match": r"ネクタイ|NECKTIE|(?<![A-Z])TIES?(?![A-Z])|(?<![ァ-ヶー])(?:ボウ|ニット|クロス|ナロー|シルク)?タイ(?![ァ-ヶー])|"
-              r"ボウタイ|BOW\s?TIE|アスコット|ASCOT|クロスタイ|ニットタイ",
+              r"ボウタイ|BOW\s?TIE|アスコット|ASCOT|クロスタイ|ニットタイ|クラヴァット|クラバット|CRAVATE|蝶ネクタイ|パピヨン",
      "conflict": r"ネクタイピン|タイピン|タイバー|タイクリップ|タイタック|TIE\s?(?:PIN|BAR|CLIP|TACK)|ネクタイ掛け|"
-                 r"ネクタイハンガー|ネクタイケース|ネクタイ柄|ブラウス|シャツ|SHIRT|ワンピース|ドレス|スーツ|セットアップ|"
-                 r"ジャケット|ベスト|ジレ|タイト|タイツ|タイ製|タイ王国|タイ国",
+                 r"ネクタイハンガー|ネクタイケース|ネクタイ柄|セットアップ|上下|ボウタイブラウス|"
+                 r"タイト|タイツ|タイ製|タイ王国|タイ国",   # 服の語（スーツ・シャツ 等）は garment_item で位置を見て除く
      "seed": "ネクタイ",
      "mercari": {"men": [391, 1755, 1756], "women": []}},
     # 小物: メルカリの 小物（ネクタイ以外）＋ 帽子・アクセサリー・カフス・フォーマル小物（ネクタイ以外）
@@ -153,8 +153,8 @@ GENRES: list[dict] = [
               r"キーホルダー|キーリング|サングラス|ネックレス|リング|ブレスレット|"
               r"ネクタイピン|タイピン|タイバー|タイクリップ|タイタック|TIE\s?(?:PIN|BAR|CLIP|TACK)|マネークリップ|レインコート|レインポンチョ",
      "conflict": r"ネクタイ(?!ピン)|NECKTIE|ボウタイ|"
-                 r"ジャケット|ワンピース|ダウン|スーツ|セットアップ|パンツ|スカート|ブルゾン|ノベルティ|付録|"
-                 r"箱のみ|保存袋のみ|ベルト付き|ベルト付|(?<!レイン)コート",
+                 r"セットアップ|上下|ノベルティ|付録|"
+                 r"箱のみ|保存袋のみ|ベルト付き|ベルト付",   # 服の語（ジャケット・スーツ・コート 等）は garment_item で位置を見て除く
      "seed": "小物・アクセサリー",
      "mercari": {"men": [401, 2128, 385, 384, 387, 1775, 394, 390, 7453, 388, 7470, 389, 395, 392, 396, 398, 408,
                          400, 386, 393, 406, 407, 409, 410, 397, 399, 413, 1751, 1753, 1757, 1754, 36, 37],
@@ -653,6 +653,108 @@ _SETUP_PIECE_RE = re.compile(r"ベスト|ジレ|GILET|VEST")
 _SETUP_SET_RE = re.compile(r"上下|セットアップ|SET\s?UP|スリーピース|3ピース|ツーピース|2ピース|3P|ジャケット|パンツ|スラックス|スカート|"
                            r"スーツ\s*(?:上下|一式)")
 
+# ── 服のジャンルで「タイトルに服の語があるが本体は小物」を除く（2026-11-26 追加） ──
+# 例: 「ルイヴィトン エピ サンチュール ベルト レザー … ビジネス スーツ メンズ」「クラヴァット … Yシャツ スーツ … ネクタイ」
+# （「ビジネス スーツ」等は検索対策で足された語。本体はベルト・ネクタイ）。
+# 小物の語（下の _ACC_CLASSES）がタイトルにあり、付属を示す表現（〜付き/付属/セット/欠品 等・柄/プリント）でないとき:
+#   - その語がジャンルの服の語（スーツ・ジャケット 等）より前にある → 本体は小物とみなして除く
+#     （出品タイトルは本体の名前を先に書く。「スーツ 上下 ネクタイ」のように服の後ろの小物は同梱とみなす）
+#   - タイトルに服の語が無い（型番・モデル名の検索 model_genre）→ 除く
+#   - セットアップ・スーツで、上下を示す語（上下/セットアップ/ジャケット/パンツ 等 = _SETUP_SET_RE）が無い → 位置に関係なく除く
+#     （「スーツ」1語だけなら、ほぼ「ビジネス スーツ」等の用途の語）
+_ACC_CLASSES: dict[str, str] = {
+    "ベルト": r"(?<!ロ)ベルト|(?<![A-Z])BELTS?(?![A-Z])|サンチュール|CEINTURE",
+    "ネクタイ": r"ネクタイ|NECKTIE|クラヴァット|クラバット|CRAVATE|ボウタイ|BOW\s?TIE|アスコットタイ|ループタイ|ニットタイ|パピヨン",
+    "タイピン・カフス": r"タイピン|タイバー|タイクリップ|タイタック|TIE\s?(?:PIN|BAR|CLIP)|カフス|カフリンクス|CUFF\s?LINKS?",
+    "財布・革小物": r"財布|ウォレット|(?<![A-Z])WALLET|コインケース|カードケース|キーケース|名刺入れ|マネークリップ|パスケース",
+    "バッグ": r"バッグ|(?<![A-Z])BAGS?(?![A-Z])|リュック|バックパック|ブリーフケース|クラッチ|ポーチ",
+    "靴": r"靴(?!下)|シューズ|(?<![A-Z])SHOES|スニーカー|SNEAKERS?|ブーツ(?!カット)|(?<![A-Z])BOOTS(?![A-Z])|ローファー|"
+          r"LOAFERS?|パンプス|サンダル|モカシン",
+    "アクセサリー": r"ネックレス|ブレスレット|バングル|ペンダント|ピアス|イヤリング|腕時計|キーホルダー|キーリング",
+    "マフラー・帽子等": r"マフラー|ストール|手袋|グローブ(?!レザー)|帽子|ハット|キャップ(?!スリーブ)",
+    "シャツ単品": r"(?<![A-Z])Yシャツ|ワイシャツ|ドレスシャツ|カッターシャツ",
+}
+_ACC_COMMON = ("ベルト", "ネクタイ", "タイピン・カフス", "財布・革小物", "バッグ", "靴", "アクセサリー", "マフラー・帽子等")
+# ジャンル → 除く小物の種類（セットアップ・スーツだけシャツ単品も。トップスはシャツが本体のことがあるので入れない）
+_ACC_FOR: dict[str, tuple[str, ...]] = {
+    "setup": _ACC_COMMON + ("シャツ単品",),
+    "jacket": _ACC_COMMON, "coat": _ACC_COMMON, "down": _ACC_COMMON, "outer": _ACC_COMMON,
+    "tops": _ACC_COMMON, "bottoms": _ACC_COMMON, "onepiece": _ACC_COMMON,
+}
+_ACC_RES = {k: re.compile(v) for k, v in _ACC_CLASSES.items()}
+# 付属・服の一部・柄を示す（小物の語の直後）
+_ACC_ATTACHED_AFTER = re.compile(r"\s*(?:付|附|つき|ツキ|セット|同梱|おまけ|オマケ|ループ|通し|欠品|なし|無し|紛失|あり|有り|有|"
+                                 r"柄|プリント|モチーフ|刺繍|PRINT|ポケット|穴|跡|部分)")
+# ネクタイの語の直後が服 → 服のデザイン（ボウタイブラウス・「ボウタイ シャツワンピース」・ボウタイカラー）
+_TIE_DESIGN_AFTER = re.compile(r"\s*(?:ブラウス|シャツ|ワンピ|カラー|襟|デザイン)")
+# 服の一部を示す（小物の語の直前）。「＋ネクタイ」「&ベルト」も同梱
+_ACC_ATTACHED_BEFORE = re.compile(r"(?:ウエスト|ウェスト|共布|共地|共生地|同素材|袖|裾|フード|[+＋&＆・]|と)\s*$")
+
+
+def _garment_pos(t: str, genre_key: str) -> int | None:
+    """タイトル（_norm 済み）でジャンルの服の語が最初に出る位置。無ければ None"""
+    g = GENRE_BY_KEY.get(genre_key)
+    if g is None:
+        return None
+    pos = [m.start() for m in [re.search(g["match"], t)] if m]
+    if genre_key in OUTER_KEYS:
+        tt = _NOT_OUTER_RE.sub(lambda m: " " * len(m.group()), t)
+        pos += [m.start() for _, rx in _OUTER_RULES for m in [rx.search(tt)] if m]
+    return min(pos) if pos else None
+
+
+def accessory_item(title: str, genre_key: str) -> str | None:
+    """服のジャンルで、本体が小物（ベルト・ネクタイ・財布・バッグ・靴 等）と思われるタイトルなら小物の種類、そうでなければ None"""
+    kinds = _ACC_FOR.get(genre_key)
+    if not kinds:
+        return None
+    t = _norm(title)
+    gpos = _garment_pos(t, genre_key)
+    loose_setup = genre_key == "setup" and not _SETUP_SET_RE.search(t)
+    for kind in kinds:
+        for m in _ACC_RES[kind].finditer(t):
+            if _ACC_ATTACHED_AFTER.match(t, m.end()) or _ACC_ATTACHED_BEFORE.search(t[:m.start()]):
+                continue
+            if kind == "ネクタイ" and _TIE_DESIGN_AFTER.match(t, m.end()):
+                continue
+            if gpos is None or m.start() < gpos or loose_setup:
+                return kind
+    return None
+
+
+# ── 逆向き: 小物のジャンル（バッグ・靴・ネクタイ・小物）で「本体は服」を除く（2026-11-26 追加） ──
+# 服の語がジャンルの小物の語より前にある → 本体は服（「トレンチコート ベルト付き」「テーラードジャケット ショルダーパッド」）。
+# 服の語が後ろだけ（「ベルト レザー … ビジネス スーツ」「ネクタイ シルク スーツに」）は検索対策の語とみなして残す。
+# 小物の語のうち付属・柄（〜付き/付属/柄/プリント 等）と、服の一部の語（ブーツカット・ショルダーパッド 等）は小物の語に数えない。
+_ITEM_GENRES = ("bag", "shoes", "tie", "komono")
+_GARMENT_RE = re.compile(
+    r"スーツ(?!ケース|カバー|用|に|向け)|(?<![A-Z])SUIT(?!CASE|\s?CASE)|セットアップ|上下|ジャケット|JACKET|ブルゾン|BLOUSON|"
+    r"(?<!レイン)コート(?!紙|ィング)|(?<![A-Z])COAT(?![A-Z])|(?<!プライス)(?<!カウント)(?<!ボタン)ダウン(?!ロード)|ワンピース|"
+    r"ドレス(?!シューズ|シャツ)|スカート|パンツ|PANTS|スラックス|ジーンズ|シャツ|SHIRT|ブラウス|ニット(?!タイ|帽|キャップ)|"
+    r"セーター|カーディガン|パーカー|トレーナー|ベスト|ジレ")
+_ITEM_MASK_RE = re.compile(r"ブーツカット|ショルダーパッド|ショルダーライン|(?:ドロップ|オフ|ワン)ショルダー(?!\s*(?:バッグ|BAG))")
+_ITEM_ATTACHED_AFTER = re.compile(r"\s*(?:付|附|つき|ツキ|柄|プリント|モチーフ|刺繍|PRINT)")
+
+
+def garment_item(title: str, genre_key: str) -> bool:
+    """小物のジャンルで、本体が服と思われるタイトルなら True"""
+    if genre_key not in _ITEM_GENRES:
+        return False
+    t = _norm(title)
+    rx = re.compile(GENRE_BY_KEY[genre_key]["match"])
+    # 服の語のすぐ後ろに小物の語が続くもの（「ダウントートバッグ」「ニットタイ」「ドレスシューズ」）は素材・種類の語なので数えない
+    g = next((m for m in _GARMENT_RE.finditer(t) if not rx.match(t, m.end())), None)
+    if g is None:
+        return False
+    tt = _ITEM_MASK_RE.sub(lambda m: " " * len(m.group()), t)
+    for m in rx.finditer(tt):
+        if _ITEM_ATTACHED_AFTER.match(tt, m.end()):
+            continue
+        if genre_key == "tie" and _TIE_DESIGN_AFTER.match(tt, m.end()):
+            return True     # 「ボウタイ シャツワンピース」= 服のデザイン
+        return g.start() < m.start()
+    return True     # 小物の語は付属・柄だけ（「ジャケット ストール付き」）
+
 
 def title_fits(title: str, brand: str, genre: dict, like_re: re.Pattern, by_category: bool = False) -> str | None:
     """タイトルがブランド・ジャンルに合うか。合わなければ除く理由（ログ用）、合えば None。
@@ -692,6 +794,11 @@ def title_fits(title: str, brand: str, genre: dict, like_re: re.Pattern, by_cate
             return "別のアイテム"
     if c is not None and c.search(t):
         return "別のアイテム"
+    acc = accessory_item(title, key)
+    if acc:
+        return f"別のアイテム（{acc}）"
+    if garment_item(title, key):
+        return "別のアイテム（服）"
     if genre.get("key") == "setup" and _SETUP_PIECE_RE.search(t) and not _SETUP_SET_RE.search(t):
         return "上下でない（ベスト・ジャケット単品等）"
     if _JUNK_RE.search(t):
