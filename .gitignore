@@ -46,3 +46,14 @@ course_genre_notes.md
 .brands_enc.sha256
 # 前回取り込んだ brands.json（平文のブランド一覧。こちらは git 管理）の印
 .brands_json.sha256
+
+# モデル登録（自分の登録・写真・共有設定。model_share.json は GitHub トークンを含みうる。公開しない）
+model_registry.json
+model_registry.json.*
+model_photos/
+model_share.json
+model_share.json.*
+# 自動更新を止めるマーカー（開発用）
+.rieki_no_update
+# パッチ適用前のバックアップ
+.backup-patch-*/

@@ -32,7 +32,7 @@ os.chdir(BASE_DIR)                      # config.json / arbitrage.db を相対�
 sys.path.insert(0, BASE_DIR)
 os.environ["RIEKI_LOCAL_APP"] = "1"     # main.run() 側の push 防止ガード
 
-from flask import Flask, jsonify, request, send_from_directory  # noqa: E402
+from flask import Flask, jsonify, request, send_file, send_from_directory  # noqa: E402
 
 import database          # noqa: E402
 import free_research     # noqa: E402
@@ -42,6 +42,8 @@ import my_list           # noqa: E402
 import analyzer          # noqa: E402
 import local_inspector   # noqa: E402
 import mercari_query     # noqa: E402
+import model_match       # noqa: E402
+import model_share       # noqa: E402
 import ocr_reader        # noqa: E402
 import photo_reader      # noqa: E402
 
@@ -747,11 +749,17 @@ def _run_job(req: dict):
             # マイブランドでリサーチ（旧: 仕入れリスト）: オンのブランド（または1グループ・1ブランド）× そのブランドのジャンルを、
             # フリーリサーチの仕組みで順番に調べる（my_list.to_free_request が list_pairs を作り、英字表記も登録する）
             req = my_list.to_free_request(req)
-        if req.get("mode") == "free":
-            # フリーリサーチモード（登録済みのモデル・型番に縛られない。free_research 参照）
-            fp = free_research.parse_request(req)
+        if req.get("mode") in ("free", "model"):
+            # フリーリサーチモード（登録済みのモデル・型番に縛られない。free_research 参照）と、
+            # 登録モデルで探すモード（写真と相場を登録したモデルだけ。model_match 参照）。結果の形は同じ
+            is_model = req.get("mode") == "model"
+            if is_model:
+                model_share.sync_if_stale()   # 共有の最新の登録で探す（つないでいなければ何もしない。失敗しても続ける）
+                n_total = model_match.plan_size(req.get("model_ids") or None)
+            else:
+                n_total = len(free_research.parse_request(req)["pairs"])
             with JOB.lock:
-                JOB.total = max(1, len(fp["pairs"]))
+                JOB.total = max(1, n_total)
             database.init_db()
 
             def keep_free(d) -> bool:
@@ -768,8 +776,9 @@ def _run_job(req: dict):
             live = _LiveResults(live_free)
             with JOB.lock:
                 JOB.live = live
-            deals = free_research.scan(req, settings, sources=sources, progress=progress,
-                                       should_stop=lambda: JOB.stop_requested, live=live)
+            scan_fn = model_match.scan if is_model else free_research.scan
+            deals = scan_fn(req, settings, sources=sources, progress=progress,
+                            should_stop=lambda: JOB.stop_requested, live=live)
             _finish_job(_best_rows(deals, keep_free))
             return
 
@@ -991,6 +1000,8 @@ def api_research():
         if req.get("mode") == "list" and not my_list.select_entries(
                 my_list.load(), str(req.get("list_group") or ""), req.get("list_ids") or None):
             return jsonify({"ok": False, "error": "調べるブランドがありません（ブランドをオンにしてください）"}), 400
+        if req.get("mode") == "model" and not model_match.select_entries(req.get("model_ids") or None):
+            return jsonify({"ok": False, "error": "調べるモデルがありません（モデルを登録して「探す」にしてください）"}), 400
         JOB.state = "running"
         JOB.index = 0
         JOB.total = 0
@@ -1172,6 +1183,171 @@ def api_mylist_defaults():
     except ValueError as ex:
         return _list_err(ex)
     return _list_ok()
+
+
+# ── モデル登録（写真と相場を登録して、写真が同じ出品だけ探す。model_match.py / local_ui/model_reg.js） ─────────
+
+_MODEL_UPLOAD_MAX = 15 * 1024 * 1024   # 写真1枚の上限
+
+
+def _models_view() -> dict:
+    v = model_match.view()
+    v["share"] = model_share.status()
+    return v
+
+
+def _model_ok(extra: dict | None = None, warn: str = ""):
+    out = {"ok": True, "models": _models_view()}
+    if warn:
+        out["warn"] = warn
+    if extra:
+        out.update(extra)
+    return jsonify(out)
+
+
+def _uploaded_photos() -> list[bytes]:
+    out = []
+    for f in request.files.getlist("photos"):
+        raw = f.read(_MODEL_UPLOAD_MAX + 1)
+        if not raw:
+            continue
+        if len(raw) > _MODEL_UPLOAD_MAX:
+            raise ValueError("写真が大きすぎます（1枚15MBまで）")
+        out.append(raw)
+    # メルカリの商品ページから選んだ写真（model_match.fetch_mercari の写真URL）
+    urls = [u for u in request.form.getlist("photo_urls") if u]
+    if urls:
+        out += model_match.download_mercari_photos(urls)
+    return out
+
+
+@app.post("/api/models/fetch")
+def api_models_fetch():
+    """メルカリの商品ページのURL → 写真・商品名・値段（登録画面の「メルカリのURLから」）"""
+    b = request.get_json(silent=True) or {}
+    try:
+        return jsonify({"ok": True, "item": model_match.fetch_mercari(b.get("url"), b.get("brand") or "")})
+    except ValueError as ex:
+        return _list_err(ex)
+    except Exception as ex:
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": f"メルカリのページを読めませんでした（{type(ex).__name__}）"}), 502
+
+
+@app.get("/api/models")
+def api_models():
+    # 共有につないでいれば、画面を開いたときに最新を取り込む（前回から30秒以内なら何もしない）
+    warn = model_share.sync_if_stale() if request.args.get("sync") == "1" else ""
+    v = _models_view()
+    if warn:
+        v["share_warn"] = warn
+    return jsonify(v)
+
+
+@app.post("/api/models/share")
+def api_models_share():
+    """登録モデルの共有: {action: connect(url, key) / sync / disconnect}"""
+    b = request.get_json(silent=True) or {}
+    act = b.get("action")
+    try:
+        if act == "connect":
+            stat = model_share.connect(b.get("url"), b.get("key"))
+        elif act == "sync":
+            stat = model_share.sync()
+        elif act == "disconnect":
+            model_share.disconnect()
+            stat = {}
+        else:
+            return jsonify({"ok": False, "error": "操作が分かりません"}), 400
+    except model_share.ShareError as ex:
+        return jsonify({"ok": False, "error": str(ex), "models": _models_view()}), 400
+    except Exception as ex:
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": f"共有の処理に失敗しました（{type(ex).__name__}）", "models": _models_view()}), 500
+    return _model_ok({"stat": stat})
+
+
+@app.post("/api/models")
+def api_models_add():
+    try:
+        e = model_match.add_entry(request.form.to_dict(), _uploaded_photos())
+    except (ValueError, KeyError) as ex:
+        return _list_err(ex)
+    return _model_ok({"entry": e}, model_share.push(e["id"], "登録"))
+
+
+@app.put("/api/models/<entry_id>")
+def api_models_update(entry_id):
+    fields = request.get_json(silent=True) or {}
+    try:
+        e = model_match.update_entry(entry_id, fields)
+    except ValueError as ex:
+        return _list_err(ex)
+    except KeyError as ex:
+        return _list_err(ex, 404)
+    # オン/オフだけの変更は共有しない（人ごとの好み）
+    shared = any(k in fields for k in ("brand", "name", "query", "price", "numbers", "zipper"))
+    return _model_ok({"entry": e}, model_share.push(entry_id) if shared else "")
+
+
+@app.post("/api/models/<entry_id>/suggest")
+def api_models_suggest(entry_id):
+    """登録写真から型番（OCR）・ファスナーの色（Mac 内 AI）の候補を出す（保存はしない。編集の「写真から自動で入れる」）"""
+    try:
+        return jsonify({"ok": True, "suggest": model_match.suggest_entry(entry_id)})
+    except KeyError as ex:
+        return _list_err(ex, 404)
+    except Exception as ex:
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": f"写真から読み取れませんでした（{type(ex).__name__}）"}), 500
+
+
+@app.delete("/api/models/<entry_id>")
+def api_models_delete(entry_id):
+    old = next((x for x in model_match.load()["entries"] if x["id"] == entry_id), None)
+    try:
+        model_match.delete_entry(entry_id)
+    except KeyError as ex:
+        return _list_err(ex, 404)
+    files = [p["file"] for p in (old or {}).get("photos", [])]
+    return _model_ok(None, model_share.remove(entry_id, files, f"{(old or {}).get('brand', '')} {(old or {}).get('name', '')}".strip()))
+
+
+@app.post("/api/models/<entry_id>/photos")
+def api_models_photos_add(entry_id):
+    try:
+        e = model_match.add_photos(entry_id, _uploaded_photos())
+    except ValueError as ex:
+        return _list_err(ex)
+    except KeyError as ex:
+        return _list_err(ex, 404)
+    return _model_ok({"entry": e}, model_share.push(entry_id))
+
+
+@app.delete("/api/models/<entry_id>/photos/<file>")
+def api_models_photos_delete(entry_id, file):
+    try:
+        e = model_match.delete_photo(entry_id, file)
+    except ValueError as ex:
+        return _list_err(ex)
+    except KeyError as ex:
+        return _list_err(ex, 404)
+    return _model_ok({"entry": e}, model_share.push(entry_id, removed_photo=file))
+
+
+@app.post("/api/models/toggle")
+def api_models_toggle():
+    b = request.get_json(silent=True) or {}
+    model_match.set_all_enabled(bool(b.get("enabled")))
+    return _model_ok()
+
+
+@app.get("/api/models/photo/<file>")
+def api_models_photo(file):
+    path = model_match.photo_path(file)
+    if not path:
+        return jsonify({"ok": False, "error": "写真が見つかりません"}), 404
+    return send_file(path, mimetype="image/jpeg", max_age=86400)
 
 
 if __name__ == "__main__":

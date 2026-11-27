@@ -27,6 +27,50 @@
   - **暗号化方式（B案など）に戻すとき**: `./venv/bin/python export_brands.py --enc` → `git rm brands.json` → `git add brands.enc` → commit → push（各スクリプトは brands.json が無ければ自動でパスワード方式に戻る。使い方案内①の文言も戻す）。
     ただし一度 public に平文を置いた履歴は消えない。
 
+## モデル登録（写真・型番・ファスナーの色。2026-11-26 追加）
+- モデル登録は配布版に含まれる機能（仲間の Mac にも自動更新で届く）。
+  `.rieki_no_update`（任意・.gitignore 済み）は、手元で改造するために手で作った Mac でだけ start.command の自動更新を止める
+  （更新すると改造した追跡ファイルが stash に退避されるため）。配布元の最新版に戻すときは `.rieki_no_update` を消す。
+- 目的: フリーリサーチ・マイブランドは「ブランド×ジャンル」の全体相場で計算するので、モデルごとの値段の差が出ない。
+  売れると分かっているモデルの **写真と相場（手入力）** を登録し、写真が同じ出品だけを、その相場で計算する。
+- `model_match.py`（登録・照合・リサーチ）、画面は `local_ui/model_reg.js`（ヘッダー「モデル登録」・はじめにの「登録したモデルを写真で探す」）、
+  API は app.py の `/api/models*`、`/api/research` に `mode: "model"`（`model_ids` が空なら「探す」のモデルすべて）。
+- 保存: `model_registry.json`（ブランド・モデル名・検索する言葉・相場・オン/オフ・写真の特徴量）と `model_photos/`（JPEG）。
+- 照合: 出品の1枚目の写真（検索結果のサムネイル）を Apple Vision で背景を消して商品だけにし（VNGenerateForegroundInstanceMaskRequest、macOS 14 以上。
+  できなければ元の写真）、VNGenerateImageFeaturePrintRequest の特徴量のコサイン類似度を登録写真と比べる。無料・Mac 内・API なし。
+  `settings.model_match_strong`（既定 0.80）以上 = 一致（確かさ 高）、`model_match_weak`（既定 0.74）以上 = 似ている・要確認（確かさ 中）、未満は結果に出さない。
+  出品写真の特徴量は DB の `model_fp_cache`（写真URL＋`FP_VERSION`）に保存。前処理を変えたら `FP_VERSION` を上げる（登録写真は次のリサーチで計算し直して保存）。
+- リサーチ: 同じ ブランド×検索する言葉 のモデルは1回の検索でまとめて照合。検索語 =「ブランド（カタカナ・英字）＋ 検索する言葉」。
+  仕入れ値の上限 = 登録相場 × 1.30 ×（1−手数料）− 送料 − 最低利益額。利益 = 登録相場 × タイトルの状態の係数（analyzer.calculate_deal そのまま）。
+  結果は free_info `{mode: "model", basis: "registered", confidence, registered: {name, price, similarity, level, photo}}`、category = 登録したモデル名
+  （結果画面の「種類」の絞り込みがモデルごとになる）。カードに登録写真を並べて目で見比べられる。
+- メルカリのURLから登録（2026-11-26）: `model_match.fetch_mercari`（商品ページの写真・商品名・値段・売り切れか）→ `/api/models/fetch`。
+  写真は `static.mercdn.net/item/detail/` のURLだけ受け取る（`download_mercari_photos`）。相場の欄に値段を入れるのは売り切れの商品だけ。
+- **みんなで共有（2026-11-27）**: `model_share.py`。置き場所は 共有用の GitHub 非公開リポジトリ（URL と合言葉は画面で入力）
+  （`models/<id>.json` = ブランド・モデル名・検索する言葉・相場・写真のファイル名、`photos/<ファイル名>`）。GitHub の Contents API で1ファイルずつ読み書き。
+  画面は モデル登録 の「🌐 みんなで共有」（共有のURL＋合言葉 →「つなぐ」）、API は `/api/models/share`（action: connect / sync / disconnect）。
+  合言葉 = そのリポジトリだけに使える GitHub の fine-grained トークン（Contents: Read and write）。空なら git に保存済みの GitHub ログインを使う（持ち主の Mac）。
+  設定は `model_share.json`（合言葉を含む。600・.git/info/exclude 済み。コミットしない・人に渡さない）。
+  登録・編集・削除のたびに送る（`push` / `remove`。失敗したら `dirty` / `trash` に控えて次の同期で送る）。受け取りは モデル登録 を開いたとき
+  （30秒に1回まで）・「今すぐ同期」・モデルのリサーチ開始前。共有から消えたモデル（`known` にあったID）はこの Mac からも消す。
+  オン/オフと写真の特徴量は共有しない（特徴量は受け取った Mac で計算）。共有から来た内容は `_clean_remote` で形を確かめる。
+- **見分けるポイント（2026-11-27）**: 登録に任意の `numbers`（型番・複数）と `zipper`（"" / "黒" / "金属"）。写真が似ている候補（利益の条件に合うもの）の
+  似ている度上位 `_CHECK_TOP`（20）件だけ `model_match._verify` で確かめる。
+  型番: タイトル → 説明文（main.fetch_descriptions）→ 写真の文字（ocr_reader。先頭2枚＋後ろ4枚、`photo_ocr_cache` に `model:<出品URL>` で保存）。
+  照合は `norm_number`（英数字だけ・O→0・I/L→1）の部分一致。一致 →「型番一致」で確かさ 高（ファスナーより優先）。このブランドの型番の形
+  （model_extractor.extract / is_number）の別の型番だけ → 除外。ただし `model_extractor.number_name` が登録のモデル名と同じなら一致扱い
+  （タトラスのアゴルドは年で MTK18A453 / MTK19A4148 / MTKE21A4148 と変わる）。
+  ファスナー: Mac 内 AI（Ollama qwen3-vl・local_inspector.chat）で出品の先頭2枚を 黒/金属/不明。違えば除外、不明は残して「要確認」。
+  判定は DB の `model_attr_cache`（写真URL＋`_ATTR_VERSION`）。Ollama が使えなければ確認を省いて残す（ログと結果カードに注記）。
+  結果は `free_info.registered.checks` = [{text, ok}]（カードの相場の根拠の下に表示）。
+  登録時: ファスナー「写真から自動で入れる」（既定）で登録写真を AI が判定、型番が空なら登録写真を OCR。メルカリのURLからの取り込みは
+  商品名＋写真（先頭2枚＋後ろ6枚）の OCR で型番を欄に入れる。編集の「📷 写真から自動で入れる」は `/api/models/<id>/suggest`（保存しない）。
+  共有: `numbers` / `zipper` は入っているときだけ `models/<id>.json` に載せる（無い登録は前と同じ内容）。
+  見送ったもの（精度不足。2026-11-27 にタトラスのダウン31枚を目視と答え合わせ）: ポケットの角度（縦/ハの字/横。指示の書き方で答えが偏り正解5〜8割）、
+  横の仕切りの数（同じ写真で5本/7本と揺れる）。ファスナーの色は黒を金属と誤答0件（隠れたファスナーを「黒」と答える誤りはあり）。1枚約5秒。
+- 限界（2026-11-26 にサンローランのクラッチ・トートで確認）: 同じ柄・同じ色の **形違い**（ジラフ柄のポーチ等）は 0.80 を超えることがある。
+  登録写真を増やす（角度違い・色違い）と拾いやすくなるが、形違いの見分けは目での確認が必要。出品の2枚目以降の写真は見ていない。
+
 ## プロジェクト概要
 ヤフオク・メルカリ・セカストから転売案件を自動スキャンし、Webダッシュボードで確認するPythonツール。
 （旧: メールで生徒に配信する仕組みだったが、ダッシュボード確認に一本化。メール配信機能は撤去済み）

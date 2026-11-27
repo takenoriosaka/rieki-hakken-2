@@ -642,3 +642,71 @@ a.tile-best:hover { box-shadow: var(--shadow-hover); }
 .card.is-seen { opacity: .62; }
 .card.is-seen:hover { opacity: 1; }
 .card.is-star { box-shadow: 0 0 0 2px var(--amber-text), var(--shadow); }
+
+/* ── モデル登録（写真と相場を登録して、写真が同じ出品だけ探す。model_reg.js） ─────────────── */
+.home-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: 860px; }
+@media (max-width: 860px) { .home-cards { grid-template-columns: 1fr; } }
+.mr-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 18px; }
+.mr-field .field-label small { font-weight: 400; font-size: 12px; color: var(--muted); margin-left: 4px; }
+.mr-drop { margin-top: 16px; border: 2px dashed var(--line-strong); border-radius: 14px; padding: 16px; background: var(--surface-2); display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.mr-drop.is-over { border-color: var(--accent); background: var(--accent-soft); }
+.mr-drop .hint { margin-top: 0; }
+.mr-previews { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 10px; }
+.mr-previews:empty { display: none; }
+.mr-thumb { position: relative; width: 84px; height: 84px; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); background: var(--surface); flex: none; }
+.mr-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.mr-thumb-x { position: absolute; top: 3px; right: 3px; width: 22px; height: 22px; border-radius: 50%; border: none; background: rgba(41, 36, 31, .72); color: #fff; font-size: 13px; line-height: 22px; padding: 0; cursor: pointer; }
+.mr-thumb-x:hover { background: var(--urgent-text); }
+.mr-list { margin-top: 10px; display: grid; gap: 10px; }
+.mr-row { display: flex; gap: 14px; align-items: flex-start; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; background: var(--surface); }
+.mr-row:not(.is-on) { background: var(--surface-2); }
+.mr-row:not(.is-on) .mr-title { color: var(--muted); }
+.mr-row-photos { display: flex; flex-wrap: wrap; gap: 8px; max-width: 280px; flex: none; }
+.mr-row-photos .mr-thumb { width: 64px; height: 64px; }
+.mr-row-main { flex: 1; min-width: 0; }
+.mr-brand { font-size: 13px; color: var(--muted); }
+.mr-title { font-size: 17px; font-weight: 700; overflow-wrap: anywhere; }
+.mr-meta { font-size: 14px; color: var(--muted); margin-top: 4px; }
+.mr-meta b { color: var(--text); font-size: 16px; }
+.mr-row-btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; align-items: center; }
+.mr-onoff { display: flex; align-items: center; gap: 6px; font-size: 14px; cursor: pointer; flex: none; white-space: nowrap; }
+.mr-onoff input { width: 18px; height: 18px; accent-color: var(--accent); }
+.mr-edit { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; }
+.mr-edit .text-in { padding: 8px 10px; font-size: 15px; }
+.mr-empty { text-align: center; color: var(--muted); padding: 26px 10px; border: 1px dashed var(--line-strong); border-radius: 12px; }
+.mr-sources { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 10px; }
+.mr-sources .switch-line { margin-top: 4px; }
+.mr-basis { display: flex; gap: 10px; align-items: flex-start; }
+.mr-basis-img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); flex: none; }
+@media (max-width: 700px) {
+  .mr-fields, .mr-edit { grid-template-columns: 1fr; }
+  .mr-row { flex-wrap: wrap; }
+}
+.mr-url { margin-top: 16px; }
+.mr-url .field-label small { font-weight: 400; font-size: 12px; color: var(--muted); margin-left: 4px; }
+.mr-url-row { display: flex; gap: 10px; }
+.mr-url-row .text-in { flex: 1; min-width: 0; }
+.mr-url-row .ghost-btn { flex: none; }
+.mr-picks { margin-top: 10px; }
+.mr-pick { padding: 0; cursor: pointer; border-width: 3px; border-color: var(--line); opacity: .55; }
+.mr-pick.on { border-color: var(--accent); opacity: 1; }
+.mr-pick .mr-pick-mark { position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: var(--on-accent); font-size: 14px; line-height: 22px; text-align: center; display: none; }
+.mr-pick.on .mr-pick-mark { display: block; }
+
+/* モデル登録: みんなで共有 */
+.mr-share { padding-top: 14px; padding-bottom: 14px; }
+.mr-share-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.mr-share-head .toolbar { margin-left: auto; display: flex; gap: 10px; align-items: center; }
+.mr-share-state { font-size: 13px; color: var(--muted); }
+.mr-share-state.on { color: var(--accent); font-weight: 600; }
+.mr-share-body { margin-top: 12px; }
+.mr-share-form { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-top: 10px; }
+.mr-share-form .mr-field { flex: 1; min-width: 220px; }
+.mr-share-form .field-label small { font-weight: 400; font-size: 12px; color: var(--muted); margin-left: 4px; }
+#mrShareOn { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+#mrShareOn[hidden], .mr-share-form[hidden] { display: none; }
+
+/* モデル登録: 見分けるポイント（型番・ファスナーの色。任意） */
+.mr-more { margin-top: 10px; }
+.mr-more > summary { cursor: pointer; font-weight: 700; padding: 4px 0; }
+.mr-more .mr-fields { margin-top: 6px; }

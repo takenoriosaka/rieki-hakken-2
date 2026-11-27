@@ -104,7 +104,8 @@ function canReach(step) {
 
 // ── 画面切り替え ─────────────────────────────────────────
 function showView(name) {
-  ['home', 'setup', 'free', 'list', 'progress', 'result'].forEach(v => { $(v + 'View').hidden = v !== name; });
+  ['home', 'setup', 'free', 'list', 'model', 'progress', 'result'].forEach(v => { $(v + 'View').hidden = v !== name; });
+  $('navModel').classList.toggle('on', name === 'model');
   $('navHome').classList.toggle('on', name === 'home');
   $('navSetup').classList.toggle('on', name === 'setup');
   $('navFree').classList.toggle('on', name === 'free');
@@ -830,6 +831,7 @@ function updateNav() {
   if (currentStep === 4) renderFinal();
   if (isFreeView()) renderFreeFinal();
   if (typeof isListView === 'function' && isListView()) renderListFinal();
+  if (typeof isModelView === 'function' && isModelView()) mrRenderFinal();
   renderLastBanner();
 }
 
@@ -854,6 +856,7 @@ function condSummary(c) {
   if (!c || typeof c !== 'object') return '';
   const arr = v => (Array.isArray(v) ? v : []);
   if (c.mode === 'list') return listCondSummary(c);
+  if (c.mode === 'model') return modelCondSummary(c);
   if (c.mode === 'free') return freeCondSummary(c);
   const cats = arr(c.categories).map(catName);
   const brands = arr(c.brands);
@@ -980,7 +983,7 @@ async function loadHistory() {
 }
 function histModeLabel(c) {
   const m = c && c.mode;
-  return m === 'list' ? 'マイブランド' : m === 'free' ? `自由に探す（${joinShort((c.free_brands || []), 2)}）` : '型番で探す';
+  return m === 'list' ? 'マイブランド' : m === 'model' ? '登録モデル' : m === 'free' ? `自由に探す（${joinShort((c.free_brands || []), 2)}）` : '型番で探す';
 }
 function renderHistRow() {
   const row = $('histRow');
@@ -1241,7 +1244,7 @@ function isFreeView() { return !$('freeView').hidden; }
 function showFree() { showView('free'); renderFree(); }
 function backToConditions() {
   const m = LAST && LAST.conditions && LAST.conditions.mode;
-  if (m === 'list') showList(); else if (m === 'free') showFree(); else goStep(4, true);
+  if (m === 'list') showList(); else if (m === 'model') showModels(); else if (m === 'free') showFree(); else goStep(4, true);
 }
 function freeOpts() { return OPTIONS.free || { brands: [], genres: [], features: [], seed_count: 0 }; }
 
@@ -1446,6 +1449,11 @@ function shippingNote(d) {
 function freeBadges(d) {
   const f = d.free_info;
   if (!f) return '';
+  if (f.basis === 'registered') {
+    const weak = f.registered && f.registered.level === 'weak';
+    const numOk = ((f.registered && f.registered.checks) || []).some(c => c.ok && String(c.text).startsWith('型番一致'));
+    return `<span class="badge conf conf-${esc(f.confidence)}" title="出品の写真と登録した写真の似ている度">${numOk ? '🔢 型番が一致' : (weak ? '📷 似ている（要確認）' : '📷 写真が一致')}</span>`;
+  }
   const g = f.gender === '不明' ? '性別不明' : f.gender;
   return `<span class="badge conf conf-${esc(f.confidence)}" title="メルカリで売れた数が多く、値段のばらつきが小さいほど「高」">相場の確かさ ${esc(f.confidence)}</span><span class="badge b-gender">${esc(g)}</span>`;
 }
@@ -1453,6 +1461,22 @@ function freeBadges(d) {
 function freeInfoHtml(d) {
   const f = d.free_info;
   if (!f) return '';
+  if (f.basis === 'registered' && f.registered) {
+    // 登録モデルで探す（model_match.py）: 登録した写真と相場が根拠。登録写真を並べて、目で見比べられるようにする
+    const r = f.registered;
+    const pct = Math.round((r.similarity || 0) * 100);
+    return `<div class="free-info mr-basis">
+      ${r.photo ? `<img class="mr-basis-img" src="/api/models/photo/${encodeURIComponent(r.photo)}" alt="登録した写真" loading="lazy" onerror="this.remove()">` : ''}
+      <div>
+        <div class="fi-head">📊 相場の根拠</div>
+        <div class="fi-basis">登録モデル「<b>${esc(r.name)}</b>」の相場 <b>${yen(r.price)}</b>（自分で登録）に、出品の状態を掛けて計算<br>
+          写真の似ている度 <b>${pct}%</b>（${r.level === 'weak' ? '似ている・要確認' : '一致'}）</div>
+        ${(r.checks || []).length ? `<div class="fi-sub">${r.checks.map(c => `<span class="${c.ok ? '' : 'warn'}">${esc(c.text)}</span>`).join('　／　')}</div>` : ''}
+        ${r.level === 'weak' ? '<div class="fi-note">※ 別のモデルが混ざることがある似かたです。左の登録写真と見比べてください</div>' : ''}
+        ${(f.also_on || []).length ? `<div class="fi-sub">同じ商品が他の仕入れ先にも: ${f.also_on.map(a => `<a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(SOURCE_LABELS[a.source] || a.source)} ${yen(a.price)}</a>`).join('・')}</div>` : ''}
+      </div>
+    </div>`;
+  }
   const gm = f.genre_market, mm = f.model_market;
   let basis = '';
   if (f.basis === 'model' && mm) {

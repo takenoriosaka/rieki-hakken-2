@@ -21,6 +21,7 @@
     <nav class="header-nav">
       <button type="button" class="nav-btn" id="navHome" onclick="showHome()">🏠 はじめに</button>
       <button type="button" class="nav-btn" id="navList" onclick="showList()">マイブランド</button>
+      <button type="button" class="nav-btn" id="navModel" onclick="showModels()">モデル登録</button>
       <button type="button" class="nav-btn" id="navFree" onclick="showFree()">自由に探す</button>
       <button type="button" class="nav-btn" id="navSetup" onclick="showSetup()">型番で探す</button>
       <button type="button" class="nav-btn" id="navResults" onclick="showResultsView()" hidden>結果を見る</button>
@@ -44,6 +45,12 @@
         <span class="home-icon" aria-hidden="true">⭐</span>
         <span class="home-title">登録したブランドで探す</span>
         <span class="home-desc">よく仕入れるブランドを登録しておき、まとめて探します</span>
+        <span class="home-go">はじめる →</span>
+      </button>
+      <button type="button" class="home-card" onclick="showModels()">
+        <span class="home-icon" aria-hidden="true">📷</span>
+        <span class="home-title">登録したモデルを写真で探す</span>
+        <span class="home-desc">モデルごとに写真と相場を登録しておき、写真が同じ出品だけを、その相場で探します</span>
         <span class="home-go">はじめる →</span>
       </button>
       <button type="button" class="home-card" onclick="showFree()">
@@ -461,6 +468,156 @@
     </section>
   </section>
 
+  <!-- ───────── モデル登録（写真と相場を登録して、写真が同じ出品だけ探す。model_match.py / model_reg.js） ───────── -->
+  <section id="modelView" class="view" hidden>
+    <div class="mode-bar">
+      <span class="mode-now">登録したモデルを写真で探す：写真が同じ出品だけを、自分で入れた相場で計算します</span>
+      <button type="button" class="link-btn" onclick="mrScrollResearch()">リサーチへ進む ↓</button>
+    </div>
+    <div class="hint warn" id="mrUnavailable" hidden>この Mac では写真の照合が使えません（macOS と、写真の文字読み取りと同じ部品が必要です）。</div>
+
+    <section class="step mr-share" id="mrShare">
+      <div class="mr-share-head">
+        <b>🌐 みんなで共有</b>
+        <span id="mrShareState" class="mr-share-state"></span>
+        <span class="toolbar">
+          <button type="button" class="ghost-btn" id="mrShareSync" hidden>今すぐ同期</button>
+          <button type="button" class="link-btn" id="mrShareToggle"></button>
+        </span>
+      </div>
+      <div class="hint" id="mrShareMsg" role="status"></div>
+      <div class="mr-share-body" id="mrShareBody" hidden>
+        <p class="hint" id="mrShareHelp"></p>
+        <div class="mr-share-form" id="mrShareForm">
+          <div class="mr-field">
+            <label for="mrShareUrl" class="field-label">共有のURL</label>
+            <input type="url" id="mrShareUrl" class="text-in" placeholder="https://github.com/名前/置き場所" autocomplete="off">
+          </div>
+          <div class="mr-field">
+            <label for="mrShareKey" class="field-label">合言葉 <small>もらった文字をそのまま貼る</small></label>
+            <input type="password" id="mrShareKey" class="text-in" autocomplete="off">
+          </div>
+          <button type="button" class="primary-btn" id="mrShareConnect">つなぐ</button>
+        </div>
+        <div id="mrShareOn" hidden>
+          <button type="button" class="ghost-btn" id="mrShareCopy">共有のURLをコピー</button>
+          <button type="button" class="ghost-btn" id="mrShareOff">共有をやめる</button>
+          <span class="hint" id="mrShareOffAsk" hidden>この Mac の登録は残ります。やめますか？
+            <button type="button" class="ghost-btn" id="mrShareOffYes">やめる</button>
+            <button type="button" class="ghost-btn" id="mrShareOffNo">やめない</button></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="step">
+      <div class="step-head">
+        <h2>① モデルを登録</h2>
+        <p>売れると分かっているモデルの写真と、メルカリでの相場を入れます。写真は正面から全体が写ったものを。角度や色が違う写真も足すと見つけやすくなります。</p>
+      </div>
+      <div class="mr-form" id="mrForm">
+        <div class="mr-fields">
+          <div class="mr-field">
+            <label for="mrBrand" class="field-label">ブランド</label>
+            <input type="text" id="mrBrand" class="text-in" list="mrBrandList" placeholder="例：イヴ・サンローラン" autocomplete="off">
+            <datalist id="mrBrandList"></datalist>
+          </div>
+          <div class="mr-field">
+            <label for="mrName" class="field-label">モデル名 <small>自分で分かる呼び名でOK</small></label>
+            <input type="text" id="mrName" class="text-in" placeholder="例：ジラフ柄 クラッチ" autocomplete="off">
+          </div>
+          <div class="mr-field">
+            <label for="mrQuery" class="field-label">検索する言葉 <small>空欄ならブランド名だけ</small></label>
+            <input type="text" id="mrQuery" class="text-in" placeholder="例：クラッチバッグ" autocomplete="off">
+          </div>
+          <div class="mr-field mr-field-price">
+            <label for="mrPrice" class="field-label">相場 <small>メルカリで売れる値段</small></label>
+            <div class="num-box"><input type="number" id="mrPrice" min="500" step="500" inputmode="numeric"><span>円</span></div>
+          </div>
+        </div>
+        <details class="mr-more">
+          <summary>見分けるポイント（入れなくてもOK）</summary>
+          <p class="hint">写真の見た目だけだと、同じ色・形の別モデルも「似ている」になります。分かるものだけ入れると、違う出品を外せます。</p>
+          <div class="mr-fields">
+            <div class="mr-field">
+              <label for="mrNumbers" class="field-label">型番 <small>タグに書いてある英数字。複数はカンマ区切り</small></label>
+              <input type="text" id="mrNumbers" class="text-in" placeholder="例：MTK18A453, MTK20A4148" autocomplete="off">
+            </div>
+            <div class="mr-field">
+              <label for="mrZipper" class="field-label">ファスナーの色 <small>前のファスナー</small></label>
+              <select id="mrZipper" class="text-in">
+                <option value="auto">写真から自動で入れる</option>
+                <option value="">指定なし</option>
+                <option value="黒">黒</option>
+                <option value="金属">金属色（銀・金）</option>
+              </select>
+            </div>
+          </div>
+          <p class="hint">型番が出品のタイトル・説明文・タグの写真で確認できると「型番一致」で確実に残ります。違う型番は外します。
+            ファスナーの色は Mac内AI（無料）が写真を見て確かめ、違う色は外し、分からないものは「要確認」で残します。型番が空なら、登録した写真のタグからも自動で読み取ります。</p>
+        </details>
+        <div class="mr-url">
+          <label for="mrUrl" class="field-label">メルカリのURLから写真を取り込む <small>売り切れの商品ページでもOK</small></label>
+          <div class="mr-url-row">
+            <input type="url" id="mrUrl" class="text-in" placeholder="https://jp.mercari.com/item/m…" autocomplete="off">
+            <button type="button" class="ghost-btn" id="mrFetchBtn">写真を取り込む</button>
+          </div>
+          <div class="hint" id="mrUrlMsg" role="status"></div>
+          <div class="mr-previews mr-picks" id="mrPicks"></div>
+        </div>
+        <div class="mr-drop" id="mrDrop">
+          <input type="file" id="mrFiles" accept="image/*" multiple hidden>
+          <button type="button" class="ghost-btn" id="mrPick">📷 写真を選ぶ</button>
+          <span class="hint">ここに写真をドラッグ、またはコピーした画像を貼り付け（⌘V）でも入ります</span>
+          <div class="mr-previews" id="mrPreviews"></div>
+        </div>
+        <div class="ml-form-btns">
+          <button type="button" class="primary-btn" id="mrAddBtn">＋ このモデルを登録</button>
+          <span class="hint" id="mrMsg" role="status"></span>
+        </div>
+      </div>
+
+      <div class="ml-top">
+        <div class="ml-count" id="mrCount"></div>
+        <span class="toolbar">
+          <button type="button" class="ghost-btn" data-mr-all="on">すべて「探す」</button>
+          <button type="button" class="ghost-btn" data-mr-all="off">すべて「探さない」</button>
+        </span>
+      </div>
+      <div class="mr-list" id="mrList"></div>
+    </section>
+
+    <section class="step" id="mrResearch">
+      <div class="step-head">
+        <h2>② リサーチ開始</h2>
+        <p>「探す」にしたモデルを仕入れ先で検索し、写真が同じ出品だけを結果に出します。</p>
+      </div>
+      <div class="free-block">
+        <label for="mrTarget" class="field-label">調べるモデル</label>
+        <select id="mrTarget" class="text-in"></select>
+      </div>
+      <div class="cond-grid">
+        <div class="cond-card">
+          <h3>最低利益額</h3>
+          <div class="num-box"><input type="number" id="mrMinProfit" min="0" step="500" inputmode="numeric"><span>円</span></div>
+          <div class="hint">仕入れ値の上限は、登録した相場とこの利益額から自動で決めます</div>
+        </div>
+        <div class="cond-card">
+          <h3>取得件数 <small>仕入れ先ごと</small></h3>
+          <div class="seg seg-presets" id="mrPerSourceSeg"></div>
+          <div class="hint">多いほど見つかりやすく、時間がかかります</div>
+        </div>
+      </div>
+      <div class="sub-head"><h3>仕入れ先</h3></div>
+      <div class="mr-sources" id="mrSources"></div>
+      <div class="final-box">
+        <h3>この内容で探します</h3>
+        <div class="final-line" id="mrFinalLine"></div>
+        <button type="button" class="start-btn" id="mrStartBtn" onclick="mrStartResearch()">🔍 リサーチ開始</button>
+        <div class="error-line" id="mrErrorLine" role="alert"></div>
+      </div>
+    </section>
+  </section>
+
   <!-- ───────── 調査中 ───────── -->
   <section id="progressView" class="view" hidden>
     <div class="progress-card">
@@ -577,5 +734,6 @@
 <footer class="app-footer">ローカル専用（このMacの中だけで動いています）</footer>
 <script src="/ui/research.js"></script>
 <script src="/ui/my_list.js"></script>
+<script src="/ui/model_reg.js"></script>
 </body>
 </html>

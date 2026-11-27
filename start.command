@@ -40,7 +40,11 @@ main() {
     fi
 
     # ---- 2) 最新版を取得 ----
-    if [ "${RIEKI_SKIP_UPDATE:-}" != "1" ]; then
+    # この Mac 専用に改造した版（モデル登録など）は、.rieki_no_update があるあいだ自動更新をしない
+    # （更新すると改造したファイルが退避されて消えるため。配布元の最新版に戻したいときはこのファイルを消す）
+    if [ -f .rieki_no_update ]; then
+        echo "この Mac 専用の改造版のため、自動更新は止めています。"
+    elif [ "${RIEKI_SKIP_UPDATE:-}" != "1" ]; then
         update_repo
     fi
 
